@@ -1,110 +1,140 @@
 #!/bin/bash
 
-# 设置目标路径
-SCRIPT_PATH="/usr/local/bin/vps_notify.sh"
-CONFIG_PATH="/etc/vps_notify.conf"
-SERVICE_PATH="/etc/systemd/system/vps_notify_boot.service"
+NOTIFY_DIR="/usr/local/vps_notify"
+SCRIPT_NAME="vps_notify.sh"
+SERVICE_NAME="vps-notify.service"
+LOGIN_SCRIPT="/etc/profile.d/vps_ssh_notify.sh"
 
-# 输入参数
-read -p "请输入 Telegram Bot Token: " BOT_TOKEN
-read -p "请输入 Telegram Chat ID: " CHAT_ID
-
-# 创建配置文件
-cat > "$CONFIG_PATH" <<EOF
-BOT_TOKEN="${BOT_TOKEN}"
-CHAT_ID="${CHAT_ID}"
-EOF
-
-chmod 600 "$CONFIG_PATH"
-
-# 下载主脚本
-cat > "$SCRIPT_PATH" <<'EOF'
-#!/bin/bash
-
-# Load config
-CONFIG="/etc/vps_notify.conf"
-[ -f "$CONFIG" ] && source "$CONFIG" || exit 1
-
-BOT_TOKEN="${BOT_TOKEN}"
-CHAT_ID="${CHAT_ID}"
-
-HOSTNAME=$(hostname 2>/dev/null)
-IP_ADDR=$(curl -s --max-time 5 https://api.ipify.org || echo "未知")
-[ -z "$HOSTNAME" ] && HOSTNAME="未知"
-[ -z "$IP_ADDR" ] && IP_ADDR="未知"
-TIME_NOW=$(date "+%Y年 %m月 %d日 %A %T %Z")
-
-send_message() {
-    local MSG="$1"
-    curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-        -d chat_id="${CHAT_ID}" \
-        -d text="$MSG" \
-        -d parse_mode="Markdown"
+read_config() {
+  if [[ -f "$NOTIFY_DIR/config" ]]; then
+    source "$NOTIFY_DIR/config"
+  fi
 }
 
-case "$1" in
-    boot)
-        MSG="✅ *VPS 已上線*\n\n🖥️ *主機名:* \`$HOSTNAME\`\n🌐 *公網IP:* \`$IP_ADDR\`\n🕒 *時間:* $TIME_NOW"
-        send_message "$MSG"
-        ;;
-    ssh)
-        SSH_USER=$(whoami)
-        SSH_IP=$(last -i | grep "still logged in" | grep "$SSH_USER" | head -n 1 | awk '{print $3}')
-        [ -z "$SSH_IP" ] && SSH_IP="未知"
-        MSG="🔐 *SSH 登錄通知*\n\n👤 *用戶:* \`$SSH_USER\`\n🖥️ *主機:* \`$HOSTNAME\`\n🌐 *來源 IP:* \`$SSH_IP\`\n🕒 *時間:* $TIME_NOW"
-        send_message "$MSG"
-        ;;
-    memcheck)
-        LOG=/tmp/vps_mem_warn_time
-        MEM_USED=$(free | awk '/Mem:/ { printf("%.0f", $3/$2 * 100) }')
-        NOW_TS=$(date +%s)
+write_config() {
+  mkdir -p "$NOTIFY_DIR"
+  cat <<EOF > "$NOTIFY_DIR/config"
+BOT_TOKEN="$BOT_TOKEN"
+CHAT_ID="$CHAT_ID"
+EOF
+}
 
-        if [ "$MEM_USED" -ge 90 ]; then
-            LAST_TS=0
-            [ -f "$LOG" ] && LAST_TS=$(cat "$LOG")
-            ELAPSED=$((NOW_TS - LAST_TS))
+install_notify_script() {
+  echo -e "\n==== 安裝通知腳本 ===="
+  read -p "請輸入 Telegram Bot Token: " BOT_TOKEN
+  read -p "請輸入 Telegram Chat ID: " CHAT_ID
+  write_config
 
-            if [ "$ELAPSED" -ge 21600 ]; then
-                echo "$NOW_TS" > "$LOG"
-                MSG="⚠️ *內存警告*\n\n🖥️ *主機:* \`$HOSTNAME\`\n📈 *使用率:* ${MEM_USED}%\n🕒 *時間:* $TIME_NOW"
-                send_message "$MSG"
-            fi
-        fi
-        ;;
-    *)
-        echo "Usage: $0 [boot|ssh|memcheck]"
-        ;;
-esac
+  cat <<'EOF' > "$NOTIFY_DIR/$SCRIPT_NAME"
+#!/bin/bash
+source "$NOTIFY_DIR/config"
+
+HOSTNAME=$(hostname)
+PUBLIC_IP=$(curl -s --max-time 3 https://api.ipify.org)
+TIME=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
+
+MESSAGE="✅ VPS 已上線
+
+🖥️ 主機名: <code>$HOSTNAME</code>
+🌐 公網IP: <code>$PUBLIC_IP</code>
+🕒 時間: <code>$TIME</code>"
+
+curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+    -d chat_id="$CHAT_ID" \
+    -d text="$MESSAGE" \
+    -d parse_mode="HTML"
 EOF
 
-chmod +x "$SCRIPT_PATH"
+  chmod +x "$NOTIFY_DIR/$SCRIPT_NAME"
 
-# 创建 systemd 服务用于开机启动通知
-cat > "$SERVICE_PATH" <<EOF
+  cat <<EOF > "/etc/systemd/system/$SERVICE_NAME"
 [Unit]
-Description=VPS Telegram 通知腳本
-After=network.target
+Description=VPS Notify on Boot
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=${SCRIPT_PATH} boot
 Type=oneshot
+ExecStart=$NOTIFY_DIR/$SCRIPT_NAME
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reexec
-systemctl daemon-reload
-systemctl enable vps_notify_boot.service
+  systemctl daemon-reexec
+  systemctl daemon-reload
+  systemctl enable $SERVICE_NAME
+  echo -e "\n✅ 安裝完成，已設置開機啟動通知。"
+}
 
-# 设置 pam_exec 用于 SSH 登录通知
-PAM_EXEC_LINE="session optional pam_exec.so /usr/local/bin/vps_notify.sh ssh"
-if ! grep -Fxq "$PAM_EXEC_LINE" /etc/pam.d/sshd; then
-    echo "$PAM_EXEC_LINE" >> /etc/pam.d/sshd
+setup_ssh_login_notify() {
+  cat <<'EOF' > "$LOGIN_SCRIPT"
+#!/bin/bash
+source "$NOTIFY_DIR/config"
+
+if [[ -n "$SSH_CONNECTION" ]]; then
+  IP=$(echo $SSH_CONNECTION | awk '{print $1}')
+  [[ "$IP" == 172.* ]] && exit 0
+  USER=$(whoami)
+  HOST=$(hostname)
+  TIME=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
+
+  MESSAGE="🔐 SSH 登錄通知\n\n👤 用戶: <code>$USER</code>\n🖥️ 主機: <code>$HOST</code>\n🌐 來源 IP: <code>$IP</code>\n🕒 時間: <code>$TIME</code>"
+
+  curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+      -d chat_id="$CHAT_ID" \
+      -d text="$MESSAGE" \
+      -d parse_mode="HTML"
 fi
+EOF
+  chmod +x "$LOGIN_SCRIPT"
+}
 
-# 添加定时任务检查内存
-CRON_LINE="*/5 * * * * /usr/local/bin/vps_notify.sh memcheck"
-( crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH memcheck"; echo "$CRON_LINE" ) | crontab -
+modify_config() {
+  read_config
+  echo -e "\n==== 修改通知配置 ===="
+  read -p "當前 Bot Token [$BOT_TOKEN]，請輸入新的（回車跳過）: " NEW_TOKEN
+  read -p "當前 Chat ID [$CHAT_ID]，請輸入新的（回車跳過）: " NEW_CHAT
+  BOT_TOKEN="${NEW_TOKEN:-$BOT_TOKEN}"
+  CHAT_ID="${NEW_CHAT:-$CHAT_ID}"
+  write_config
+  echo "✅ 配置已更新。"
+}
 
-echo "✅ 安裝完成，可重啟 VPS 測試開機推送。"
+uninstall_all() {
+  echo -e "\n⚠️ 確定要卸載通知腳本？(y/n): "
+  read confirm
+  if [[ "$confirm" != "y" ]]; then
+    echo "取消卸載。"
+    return
+  fi
+  systemctl disable $SERVICE_NAME &>/dev/null
+  rm -f "/etc/systemd/system/$SERVICE_NAME"
+  rm -f "$LOGIN_SCRIPT"
+  rm -rf "$NOTIFY_DIR"
+  systemctl daemon-reload
+  echo "✅ 已卸載所有通知腳本。"
+}
+
+main_menu() {
+  while true; do
+    echo -e "\nVPS 通知腳本管理器"
+    echo "============================"
+    echo "1) 安裝通知腳本"
+    echo "2) 修改 TG 配置"
+    echo "3) 卸載通知腳本"
+    echo "0) 退出"
+    echo "============================"
+    read -p "請輸入選項 [0-3]: " opt
+
+    case $opt in
+      1) install_notify_script && setup_ssh_login_notify ;;
+      2) modify_config ;;
+      3) uninstall_all ;;
+      0) exit 0 ;;
+      *) echo "❌ 無效選項，請重新輸入。" ;;
+    esac
+  done
+}
+
+main_menu
