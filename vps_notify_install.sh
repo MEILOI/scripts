@@ -1,112 +1,35 @@
 #!/bin/bash
 
-# =======================================
-# Telegram VPS 通知安裝腳本
-# 適用於 Debian 系統
-# 作者：ChatGPT + 用戶優化需求整合
-# =======================================
+#=====================
+# VPS 一键通知脚本（支持 Telegram 通知、SSH 登录提示、资源监控）
+# 支持 HTML 消息格式，多用户推送
+#=====================
 
-set -e
+install_script() {
+  echo "正在安装依赖组件..."
+  apt update -y && apt install -y curl jq lsof net-tools > /dev/null 2>&1
 
-SCRIPT_PATH="/usr/local/bin/vps_notify.sh"
-SERVICE_PATH="/etc/systemd/system/vps_notify.service"
-PROFILE_PATH="/etc/profile.d/vps_notify_env.sh"
+  echo "请输入 Telegram Bot Token："
+  read -rp "BOT_TOKEN: " BOT_TOKEN
+  echo "请输入接收通知的 Telegram 用户或频道 ID（多个用逗号分隔）："
+  read -rp "CHAT_IDS: " CHAT_IDS
 
-function install_dependencies() {
-    echo "[INFO] 正在安裝依賴項..."
-    apt update -y && apt install -y curl sudo bash coreutils lsb-release
-}
+  echo "是否启用 SSH 登录通知？(y/n): "
+  read -rp "SSH_NOTIFY: " SSH_NOTIFY
 
-function get_user_input() {
-    echo "請輸入您的 Telegram Bot Token："
-    read -rp "BOT_TOKEN: " BOT_TOKEN
-    echo "請輸入您的 Telegram Chat ID："
-    read -rp "CHAT_ID: " CHAT_ID
+  echo "是否启用内存占用监控（超过90%通知）？(y/n): "
+  read -rp "MEMORY_MONITOR: " MEMORY_MONITOR
 
-    echo "export TELEGRAM_BOT_TOKEN=\"${BOT_TOKEN}\"" > "$PROFILE_PATH"
-    echo "export TELEGRAM_CHAT_ID=\"${CHAT_ID}\"" >> "$PROFILE_PATH"
-    chmod +x "$PROFILE_PATH"
-    source "$PROFILE_PATH"
-}
+  echo "是否启用 CPU 负载监控（Load > 2 通知）？(y/n): "
+  read -rp "CPU_MONITOR: " CPU_MONITOR
 
-function write_script() {
-    cat > "$SCRIPT_PATH" <<'EOF'
+  cat <<EOF > /usr/local/bin/vps_notify.sh
 #!/bin/bash
+BOT_TOKEN="${BOT_TOKEN}"
+CHAT_IDS="${CHAT_IDS}"
+HOSTNAME=\$(hostname)
+DATETIME=\$(date '+%Y年 %m月 %d日 %A %T %Z')
+IPV4=\$(curl -4s --max-time 3 ip.sb || echo "獲取失敗")
+IPV6=\$(curl -6s --max-time 3 ip.sb || echo "獲取失敗")
 
-source /etc/profile.d/vps_notify_env.sh
-
-BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
-CHAT_ID="$TELEGRAM_CHAT_ID"
-
-HOSTNAME=$(hostname)
-IPV4=$(curl -s --max-time 5 https://api64.ipify.org || echo "獲取失敗")
-IPV6=$(curl -s --max-time 5 https://api6.ipify.org || echo "獲取失敗")
-TIME=$(date +"%Y年 %m月 %d日 %A %T %Z")
-
-MESSAGE="✅ VPS 已上線\n\n🖥️ 主機名: ${HOSTNAME}\n🌐 公網IP:\nIPv4: ${IPV4}\nIPv6: ${IPV6}\n🕒 時間: ${TIME}"
-
-curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-     -d chat_id="${CHAT_ID}" \
-     -d text="${MESSAGE}" \
-     -d parse_mode="Markdown"
-EOF
-    chmod +x "$SCRIPT_PATH"
-}
-
-function write_service() {
-    cat > "$SERVICE_PATH" <<EOF
-[Unit]
-Description=VPS Telegram Notify
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=${SCRIPT_PATH}
-RemainAfterExit=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reexec
-    systemctl daemon-reload
-    systemctl enable vps_notify.service
-}
-
-function uninstall() {
-    echo "[INFO] 卸載中..."
-    systemctl disable vps_notify.service 2>/dev/null || true
-    rm -f "$SCRIPT_PATH" "$SERVICE_PATH" "$PROFILE_PATH"
-    systemctl daemon-reload
-    echo "[OK] 已卸載完成。"
-    exit 0
-}
-
-function menu() {
-    echo "============================="
-    echo " Telegram VPS 通知腳本"
-    echo "============================="
-    echo "1) 安裝腳本"
-    echo "2) 卸載腳本"
-    echo "0) 退出"
-    echo "============================="
-    read -rp "請選擇 [0-2]: " OPTION
-
-    case $OPTION in
-        1)
-            install_dependencies
-            get_user_input
-            write_script
-            write_service
-            echo "[OK] 安裝完成，重啟 VPS 可測試通知是否成功。"
-            ;;
-        2)
-            uninstall
-            ;;
-        *)
-            echo "[INFO] 退出。"
-            exit 0
-            ;;
-    esac
-}
-
-menu
+MSG="✅ <b>VPS 已上線</b>\n\n<b>🖥️ 主機名:</b> 
