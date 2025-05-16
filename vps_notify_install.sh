@@ -11,18 +11,17 @@ TG_API="https://api.telegram.org/bot"
 get_ip() {
     ipv4=$(curl -s4m 3 ip.sb || curl -s4m 3 ifconfig.me || echo "获取失败")
     ipv6=$(curl -s6m 3 ip.sb || curl -s6m 3 ifconfig.me || echo "获取失败")
-    echo -e "IPv4: $ipv4\\nIPv6: $ipv6"
+    echo -e "IPv4: $ipv4\nIPv6: $ipv6"
 }
 
-# 发送 Telegram 通知
+# 发送 Telegram 通知 - 使用JSON格式确保换行符正确处理
 send_tg() {
     local message="$1"
     IFS=',' read -ra IDS <<< "$TG_CHAT_IDS"
     for id in "${IDS[@]}"; do
         curl -s -X POST "${TG_API}${TG_BOT_TOKEN}/sendMessage" \
-            -d chat_id="$id" \
-            -d text="$message" \
-            -d parse_mode="Markdown"
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": \"$id\", \"text\": \"$message\", \"parse_mode\": \"Markdown\"}"
     done
 }
 
@@ -31,7 +30,12 @@ notify_boot() {
     ip_info=$(get_ip)
     hostname=$(hostname)
     time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-    message="✅ *VPS 已上線*\\n\\n🖥️ 主機名: $hostname\\n🌐 公網IP:\\n$ip_info\\n🕒 時間: $time"
+    message="✅ *VPS 已上線*
+
+🖥️ 主機名: $hostname
+🌐 公網IP:
+$ip_info
+🕒 時間: $time"
     send_tg "$message"
 }
 
@@ -41,7 +45,12 @@ notify_ssh() {
     ip="$PAM_RHOST"
     hostname=$(hostname)
     time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-    message="🔐 *SSH 登錄通知*\\n\\n👤 用戶: $user\\n🖥️ 主機: $hostname\\n🌐 來源 IP: $ip\\n🕒 時間: $time"
+    message="🔐 *SSH 登錄通知*
+
+👤 用戶: $user
+🖥️ 主機: $hostname
+🌐 來源 IP: $ip
+🕒 時間: $time"
     send_tg "$message"
 }
 
@@ -59,12 +68,14 @@ monitor_usage() {
     fi
 
     alert=""
-    [[ $ENABLE_MEM_MONITOR == "Y" && $memory -ge 90 ]] && alert+="🧠 *內存使用率過高*：${memory}%\\n"
-    [[ $ENABLE_CPU_MONITOR == "Y" && $load -ge 4 ]] && alert+="🔥 *CPU 負載過高*：${load}\\n"
+    [[ $ENABLE_MEM_MONITOR == "Y" && $memory -ge 90 ]] && alert+="🧠 *內存使用率過高*：${memory}%\n"
+    [[ $ENABLE_CPU_MONITOR == "Y" && $load -ge 4 ]] && alert+="🔥 *CPU 負載過高*：${load}\n"
 
     if [[ -n "$alert" ]]; then
         echo "$now" > /tmp/vps_notify_last
-        message="⚠️ *VPS 資源警報*\\n\\n$alert"
+        message="⚠️ *VPS 資源警報*
+
+$alert"
         send_tg "$message"
     fi
 }
@@ -91,29 +102,30 @@ install_script() {
     read -rp "(預設 Y): " ENABLE_CPU_MONITOR
     ENABLE_CPU_MONITOR=${ENABLE_CPU_MONITOR:-Y}
 
-    cat <<EOF > "$CONFIG_FILE"
+    cat <<EOL > "$CONFIG_FILE"
 TG_BOT_TOKEN="$TG_BOT_TOKEN"
 TG_CHAT_IDS="$TG_CHAT_IDS"
 SSH_NOTIFY="$SSH_NOTIFY"
 ENABLE_MEM_MONITOR="$ENABLE_MEM_MONITOR"
 ENABLE_CPU_MONITOR="$ENABLE_CPU_MONITOR"
-EOF
+EOL
 
     cp "$0" "$SCRIPT_PATH"
     chmod +x "$SCRIPT_PATH"
 
-    cat <<EOF > "$SERVICE_PATH"
+    cat <<EOL > "$SERVICE_PATH"
 [Unit]
 Description=VPS Notify Boot Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$SCRIPT_PATH boot
+ExecStart=/bin/bash $SCRIPT_PATH boot
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOL
 
     systemctl daemon-reexec
     systemctl daemon-reload
@@ -135,7 +147,13 @@ PAM
         fi
     fi
 
-    echo "✅ 安裝完成。重啟 VPS 測試開機通知。"
+    # 修复主机名解析问题
+    if ! grep -q "127.0.0.1 $(hostname)" /etc/hosts; then
+        echo "127.0.0.1 $(hostname)" >> /etc/hosts
+    fi
+
+    echo "✅ 安裝完成。重啟 VPS 測試開機通知，或執行以下命令手動測試:"
+    echo "sudo $SCRIPT_PATH boot"
 }
 
 uninstall_script() {
