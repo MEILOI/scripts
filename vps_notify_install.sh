@@ -1,99 +1,181 @@
 #!/bin/bash
 
-#=====================
-# VPS 一键通知脚本（支持 Telegram 通知、SSH 登录提示、资源监控）
-# 支持 HTML 消息格式，多用户推送
-#=====================
+CONFIG_FILE="/etc/vps_notify.conf"
+SCRIPT_PATH="/usr/local/bin/vps_notify.sh"
+SERVICE_PATH="/etc/systemd/system/vps_notify.service"
+CRON_JOB="*/5 * * * * root /usr/local/bin/vps_notify.sh monitor >/dev/null 2>&1"
+
+TG_API="https://api.telegram.org/bot"
+
+# 获取公网 IP
+get_ip() {
+    ipv4=$(curl -s4m 3 ip.sb || curl -s4m 3 ifconfig.me || echo "获取失败")
+    ipv6=$(curl -s6m 3 ip.sb || curl -s6m 3 ifconfig.me || echo "获取失败")
+    echo -e "IPv4: $ipv4\\nIPv6: $ipv6"
+}
+
+# 发送 Telegram 通知
+send_tg() {
+    local message="$1"
+    IFS=',' read -ra IDS <<< "$TG_CHAT_IDS"
+    for id in "${IDS[@]}"; do
+        curl -s -X POST "${TG_API}${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="$id" \
+            -d text="$message" \
+            -d parse_mode="Markdown"
+    done
+}
+
+# VPS 上线通知
+notify_boot() {
+    ip_info=$(get_ip)
+    hostname=$(hostname)
+    time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
+    message="✅ *VPS 已上線*\\n\\n🖥️ 主機名: $hostname\\n🌐 公網IP:\\n$ip_info\\n🕒 時間: $time"
+    send_tg "$message"
+}
+
+# SSH 登录通知
+notify_ssh() {
+    user="$PAM_USER"
+    ip="$PAM_RHOST"
+    hostname=$(hostname)
+    time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
+    message="🔐 *SSH 登錄通知*\\n\\n👤 用戶: $user\\n🖥️ 主機: $hostname\\n🌐 來源 IP: $ip\\n🕒 時間: $time"
+    send_tg "$message"
+}
+
+# 资源监控
+monitor_usage() {
+    memory=$(free | awk '/Mem:/ {printf("%.0f", $3/$2*100)}')
+    load=$(awk '{print int($1)}' /proc/loadavg)
+
+    now=$(date +%s)
+    last_warn=0
+    [ -f /tmp/vps_notify_last ] && last_warn=$(cat /tmp/vps_notify_last)
+
+    if (( now - last_warn < 21600 )); then
+        return
+    fi
+
+    alert=""
+    [[ $ENABLE_MEM_MONITOR == "Y" && $memory -ge 90 ]] && alert+="🧠 *內存使用率過高*：${memory}%\\n"
+    [[ $ENABLE_CPU_MONITOR == "Y" && $load -ge 4 ]] && alert+="🔥 *CPU 負載過高*：${load}\\n"
+
+    if [[ -n "$alert" ]]; then
+        echo "$now" > /tmp/vps_notify_last
+        message="⚠️ *VPS 資源警報*\\n\\n$alert"
+        send_tg "$message"
+    fi
+}
 
 install_script() {
-  echo "正在安装依赖组件..."
-  apt update -y && apt install -y curl jq lsof net-tools > /dev/null 2>&1
+    echo "[1/5] 檢查依賴..."
+    apt update -y && apt install -y curl cron || yum install -y curl cronie
 
-  echo "请输入 Telegram Bot Token："
-  read -rp "BOT_TOKEN: " BOT_TOKEN
-  echo "请输入接收通知的 Telegram 用户或频道 ID（多个用逗号分隔）："
-  read -rp "CHAT_IDS: " CHAT_IDS
+    echo "[2/5] 輸入 TG Bot Token:"
+    read -rp "Token: " TG_BOT_TOKEN
 
-  echo "是否启用 SSH 登录通知？(y/n): "
-  read -rp "SSH_NOTIFY: " SSH_NOTIFY
+    echo "[3/5] 輸入接收通知的 TG Chat ID（支持多個，逗號分隔）:"
+    read -rp "Chat ID(s): " TG_CHAT_IDS
 
-  echo "是否启用内存占用监控（超过90%通知）？(y/n): "
-  read -rp "MEMORY_MONITOR: " MEMORY_MONITOR
+    echo "[4/5] 啟用 SSH 登錄通知？[Y/n]"
+    read -rp "(預設 Y): " SSH_NOTIFY
+    SSH_NOTIFY=${SSH_NOTIFY:-Y}
 
-  echo "是否启用 CPU 负载监控（Load > 2 通知）？(y/n): "
-  read -rp "CPU_MONITOR: " CPU_MONITOR
+    echo "[5/5] 啟用內存使用率過高提示？[Y/n]"
+    read -rp "(預設 Y): " ENABLE_MEM_MONITOR
+    ENABLE_MEM_MONITOR=${ENABLE_MEM_MONITOR:-Y}
 
-  cat <<EOF > /usr/local/bin/vps_notify.sh
-#!/bin/bash
-BOT_TOKEN="${BOT_TOKEN}"
-CHAT_IDS="${CHAT_IDS}"
-HOSTNAME=\$(hostname)
-DATETIME=\$(date '+%Y年 %m月 %d日 %A %T %Z')
-IPV4=\$(curl -4s --max-time 3 ip.sb || echo "獲取失敗")
-IPV6=\$(curl -6s --max-time 3 ip.sb || echo "獲取失敗")
+    echo "啟用 CPU 負載過高提示？[Y/n]"
+    read -rp "(預設 Y): " ENABLE_CPU_MONITOR
+    ENABLE_CPU_MONITOR=${ENABLE_CPU_MONITOR:-Y}
 
-MSG="✅ <b>VPS 已上線</b>\n\n<b>🖥️ 主機名:</b> \${HOSTNAME}\n<b>🌐 公網IP:</b>\nIPv4: \${IPV4}\nIPv6: \${IPV6}\n<b>🕒 時間:</b> \${DATETIME}"
-
-for ID in \$(echo \${CHAT_IDS} | tr ',' ' '); do
-  curl -s -X POST "https://api.telegram.org/bot\${BOT_TOKEN}/sendMessage" \
-    -d chat_id="\${ID}" \
-    -d parse_mode="HTML" \
-    -d text="\${MSG}"
-  sleep 1
-done
+    cat <<EOF > "$CONFIG_FILE"
+TG_BOT_TOKEN="$TG_BOT_TOKEN"
+TG_CHAT_IDS="$TG_CHAT_IDS"
+SSH_NOTIFY="$SSH_NOTIFY"
+ENABLE_MEM_MONITOR="$ENABLE_MEM_MONITOR"
+ENABLE_CPU_MONITOR="$ENABLE_CPU_MONITOR"
 EOF
 
-  chmod +x /usr/local/bin/vps_notify.sh
-  echo '@reboot /usr/local/bin/vps_notify.sh' | crontab -l 2>/dev/null | grep -q 'vps_notify.sh' || (crontab -l 2>/dev/null; echo '@reboot /usr/local/bin/vps_notify.sh') | crontab -
+    cp "$0" "$SCRIPT_PATH"
+    chmod +x "$SCRIPT_PATH"
 
-  if [[ "\$SSH_NOTIFY" == "y" ]]; then
-    cat <<EOF > /etc/profile.d/ssh_notify.sh
-#!/bin/bash
-BOT_TOKEN="${BOT_TOKEN}"
-CHAT_IDS="${CHAT_IDS}"
-USER=\$(whoami)
-HOST=\$(hostname)
-SRC_IP=\$(who | awk '{print \$5}' | tr -d '()')
-TIME=\$(date '+%Y年 %m月 %d日 %A %T %Z')
+    cat <<EOF > "$SERVICE_PATH"
+[Unit]
+Description=VPS Notify Boot Service
+After=network.target
 
-MSG="🔐 <b>SSH 登錄通知</b>\n\n<b>👤 用戶:</b> \${USER}\n<b>🖥️ 主機:</b> \${HOST}\n<b>🌐 來源 IP:</b> \${SRC_IP}\n<b>🕒 時間:</b> \${TIME}"
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_PATH boot
 
-for ID in \$(echo \${CHAT_IDS} | tr ',' ' '); do
-  curl -s -X POST "https://api.telegram.org/bot\${BOT_TOKEN}/sendMessage" \
-    -d chat_id="\${ID}" \
-    -d parse_mode="HTML" \
-    -d text="\${MSG}"
-  sleep 1
-done
+[Install]
+WantedBy=multi-user.target
 EOF
-    chmod +x /etc/profile.d/ssh_notify.sh
-  fi
 
-  if [[ "\$MEMORY_MONITOR" == "y" ]]; then
-    echo "*/5 * * * * free | awk '/Mem/{if(\$3/\$2>0.9) print \"Memory Alert: \" \$3/\$2}' | grep -q 'Memory Alert' && /usr/local/bin/vps_notify.sh" | crontab -
-  fi
+    systemctl daemon-reexec
+    systemctl daemon-reload
+    systemctl enable vps_notify.service
 
-  if [[ "\$CPU_MONITOR" == "y" ]]; then
-    echo "*/5 * * * * uptime | awk -F'load average:' '{print \$2}' | awk -F',' '{if(\$1>2.0) print \"CPU Load Alert: \" \$1}' | grep -q 'CPU Load Alert' && /usr/local/bin/vps_notify.sh" | crontab -
-  fi
+    echo "$CRON_JOB" >> /etc/crontab
 
-  echo "✅ 安装完成！支持開機通知、SSH提示、資源監控！"
+    if [[ $SSH_NOTIFY == "Y" ]]; then
+        mkdir -p /etc/security
+        pam_script="/etc/security/pam_exec_notify.sh"
+        cat <<PAM > "$pam_script"
+#!/bin/bash
+PAM_USER="\$PAM_USER" PAM_RHOST="\$PAM_RHOST" $SCRIPT_PATH ssh
+PAM
+        chmod +x "$pam_script"
+
+        if ! grep -q pam_exec.so /etc/pam.d/sshd; then
+            echo "session optional pam_exec.so seteuid $pam_script" >> /etc/pam.d/sshd
+        fi
+    fi
+
+    echo "✅ 安裝完成。重啟 VPS 測試開機通知。"
 }
 
 uninstall_script() {
-  rm -f /usr/local/bin/vps_notify.sh /etc/profile.d/ssh_notify.sh
-  crontab -l | grep -v 'vps_notify.sh' | crontab -
-  echo "✅ 已卸載通知腳本與相關任務"
+    echo "正在卸載..."
+    systemctl disable vps_notify.service 2>/dev/null
+    rm -f "$SERVICE_PATH" "$SCRIPT_PATH" "$CONFIG_FILE"
+    sed -i '/vps_notify.sh monitor/d' /etc/crontab
+    sed -i '/pam_exec.so.*pam_exec_notify.sh/d' /etc/pam.d/sshd
+    rm -f /etc/security/pam_exec_notify.sh /tmp/vps_notify_last
+    echo "✅ 卸載完成。"
 }
 
-case "$1" in
-  install)
-    install_script
-    ;;
-  uninstall)
-    uninstall_script
-    ;;
-  *)
-    echo "使用方法: bash $0 install | uninstall"
-    ;;
-esac
+load_config() {
+    [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+}
+
+main() {
+    case "$1" in
+        boot)
+            load_config
+            notify_boot
+            ;;
+        ssh)
+            load_config
+            notify_ssh
+            ;;
+        monitor)
+            load_config
+            monitor_usage
+            ;;
+        install|"")
+            install_script
+            ;;
+        uninstall)
+            uninstall_script
+            ;;
+        *)
+            echo "用法: $0 [install|uninstall|boot|ssh|monitor]"
+            ;;
+    esac
+}
+
+main "$1"
