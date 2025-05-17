@@ -1,17 +1,14 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v2.82
+# VPS Notify Script (tgvsdd2.sh) v2.83
 # Purpose: Monitor VPS status (IP, SSH, resources) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 2.82 (2025-05-17)
+# Version: 2.83 (2025-05-17)
 # Changelog:
+# - v2.83: Fixed syntax error in main_menu, switched to MarkdownV2 for Telegram push, optimized escaping
 # - v2.82: Fixed Telegram validation by relaxing conditions, added retry mechanism, enhanced logging
-# - v2.81: Updated Telegram push to use JSON format with Markdown, \n\n for multiline display, added Emoji support
+# - v2.81: Updated Telegram push to use JSON format with Markdown, added Emoji support
 # - v2.8: Added retry mechanism to DingTalk validation/sending, enhanced logging, removed invalid tags
-# - v2.7: Enhanced comments, clarified validate_dingtalk logic (no access_token encryption)
-# - v2.2: Added DingTalk signed request support
-# - v2.1: Added script update functionality
-# - v2.0: Initial optimized version with menu and multi-channel notifications
 
 # Configuration file
 CONFIG_FILE="/etc/vps_notify.conf"
@@ -32,7 +29,6 @@ touch "$LOG_FILE"
 log() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$timestamp] $1" >> "$LOG_FILE" 2>/dev/null || echo "[$timestamp] $1" >&2
-    # Rotate log if exceeds max size
     if [[ -f "$LOG_FILE" && $(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE") -gt $LOG_MAX_SIZE ]]; then
         mv "$LOG_FILE" "${LOG_FILE}.old"
         touch "$LOG_FILE"
@@ -46,7 +42,6 @@ load_config() {
         source "$CONFIG_FILE"
         log "Configuration loaded from $CONFIG_FILE: ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY, TG_CHAT_IDS=$TG_CHAT_IDS"
     else
-        # Default values
         ENABLE_TG_NOTIFY=0
         TG_BOT_TOKEN=""
         TG_CHAT_IDS=""
@@ -131,29 +126,21 @@ validate_dingtalk() {
     local attempt=1
     local response errcode errmsg masked_webhook
 
-    # Mask access_token for logging
     masked_webhook=$(echo "$webhook" | sed 's/\(access_token=\).*/\1[hidden]/')
-
     while [[ $attempt -le $max_attempts ]]; do
         local timestamp=$(date +%s%3N)
         local sign=""
         local url="$webhook"
-
-        # Add timestamp and sign for signed requests
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}×tamp=${timestamp}&sign=${sign}"
+            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
         fi
-
-        # Send test message (includes keyword "VPS")
         response=$(curl -s -m 5 -X POST "$url" \
             -H "Content-Type: application/json" \
             -d '{"msgtype": "text", "text": {"content": "VPS 测试消息"}}')
-
         errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d: -f2)
         errmsg=$(echo "$response" | grep -o '"errmsg":"[^"]*"' | cut -d: -f2- | tr -d '"')
-
         if [[ "$errcode" == "0" ]]; then
             echo "DingTalk Webhook 验证成功"
             log "DingTalk validation succeeded on attempt $attempt for $masked_webhook"
@@ -176,16 +163,12 @@ send_telegram() {
     local message="$1"
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
         local final_message="$message"
-        # Replace tags with Emoji
         final_message=$(echo "$final_message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
-        # Enhance line breaks: single \n to \n\n
-        final_message=$(echo "$final_message" | sed 's/\\n/\\n\\n/g')
-        # Escape Markdown special characters
-        final_message=$(echo "$final_message" | sed 's/[_*[\]()~`>#+=|{}.!]/\\&/g')
+        final_message=$(echo "$final_message" | sed 's/[-!.*+#\[\]()>{}|=]/\\&/g')
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                 -H "Content-Type: application/json" \
-                -d "{\"chat_id\": \"${chat_id}\", \"text\": \"${final_message}\", \"parse_mode\": \"Markdown\"}")
+                -d "{\"chat_id\": \"${chat_id}\", \"text\": \"${final_message}\", \"parse_mode\": \"MarkdownV2\"}")
             if echo "$response" | grep -q '"ok":true'; then
                 log "Telegram notification sent to $chat_id: $final_message"
             else
@@ -204,25 +187,19 @@ send_dingtalk() {
         local max_attempts=3
         local attempt=1
         local response errcode masked_webhook
-
-        # Mask access_token for logging
         masked_webhook=$(echo "$DINGTALK_WEBHOOK" | sed 's/\(access_token=\).*/\1[hidden]/')
-
         while [[ $attempt -le $max_attempts ]]; do
             local timestamp=$(date +%s%3N)
             local sign=""
             local url="$DINGTALK_WEBHOOK"
-
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${DINGTALK_WEBHOOK}×tamp=${timestamp}&sign=${sign}"
+                url="${webhook}&timestamp=${timestamp}&sign=${sign}"
             fi
-
             response=$(curl -s -m 5 -X POST "$url" \
                 -H "Content-Type: application/json" \
                 -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"VPS $message\"}}")
-
             errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d: -f2)
             if [[ "$errcode" == "0" ]]; then
                 log "DingTalk notification sent on attempt $attempt for $masked_webhook: $message"
@@ -244,14 +221,12 @@ send_dingtalk() {
 get_ip() {
     local ipv4=""
     local ipv6=""
-    # Try multiple services for IPv4
     for service in "ip.sb" "ifconfig.me" "ipinfo.io/ip" "api.ipify.org"; do
         ipv4=$(curl -s -m 3 "https://$service")
         if [[ -n "$ipv4" && "$ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             break
         fi
     done
-    # Try multiple services for IPv6
     for service in "ip.sb" "ifconfig.me" "ipinfo.io/ip"; do
         ipv6=$(curl -s -m 3 -6 "https://$service")
         if [[ -n "$ipv6" && "$ipv6" =~ ^[0-9a-fA-F:]+$ ]]; then
@@ -267,48 +242,37 @@ monitor_resources() {
     local message=""
     local current_time=$(date '+%s')
     local last_alert_file="/tmp/vps_notify_last_alert"
-
-    # Check last alert time
     local last_alert=0
     if [[ -f "$last_alert_file" ]]; then
         last_alert=$(cat "$last_alert_file")
     fi
-
-    # Only send alert if 6 hours have passed
     if [[ $((current_time - last_alert)) -lt $((6*3600)) ]]; then
         return
     fi
-
-    # Memory usage
     if [[ "$ENABLE_MEM_MONITOR" -eq 1 ]]; then
         local mem_info=$(free | grep Mem)
         local total=$(echo "$mem_info" | awk '{print $2}')
         local used=$(echo "$mem_info" | awk '{print $3}')
         local usage=$((100 * used / total))
         if [[ $usage -ge $MEM_THRESHOLD ]]; then
-            message+="📊 内存使用率: ${usage}% (超过阈值 ${MEM_THRESHOLD}%)\n\n"
+            message+="📊 内存使用率: ${usage}% (超过阈值 ${MEM_THRESHOLD}%)\\n\\n"
         fi
     fi
-
-    # CPU usage
     if [[ "$ENABLE_CPU_MONITOR" -eq 1 ]]; then
         local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}')
         local usage=$(printf "%.0f" "$cpu_usage")
         if [[ $usage -ge $CPU_THRESHOLD ]]; then
-            message+="📈 CPU 使用率: ${usage}% (超过阈值 ${CPU_THRESHOLD}%)\n\n"
+            message+="📈 CPU 使用率: ${usage}% (超过阈值 ${CPU_THRESHOLD}%)\\n\\n"
         fi
     fi
-
-    # Disk usage
     if [[ "$ENABLE_DISK_MONITOR" -eq 1 ]]; then
         local disk_usage=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
         if [[ $disk_usage -ge $DISK_THRESHOLD ]]; then
-            message+="💾 磁盘使用率: ${disk_usage}% (超过阈值 ${DISK_THRESHOLD}%)\n\n"
+            message+="💾 磁盘使用率: ${disk_usage}% (超过阈值 ${DISK_THRESHOLD}%)\\n\\n"
         fi
     fi
-
     if [[ -n "$message" ]]; then
-        message="⚠️ 资源警报 [警告]\n\n$message🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+        message="⚠️ 资源警报 [警告]\\n\\n${message}🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
         send_telegram "$message"
         send_dingtalk "$message"
         echo "$current_time" > "$last_alert_file"
@@ -326,7 +290,7 @@ monitor_ip() {
             old_ip=$(cat "$ip_file")
         fi
         if [[ "$current_ip" != "$old_ip" ]]; then
-            local message="🌐 IP 变动 [网络]\n\n📝 备注: ${REMARK:-未设置}\n\n🖥️ 主机名: $(hostname)\n\n旧 IP:\n$old_ip\n\n新 IP:\n$current_ip\n\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+            local message="🌐 IP 变动 [网络]\\n\\n📝 备注: ${REMARK:-未设置}\\n\\n🖥️ 主机名: $(hostname)\\n\\n旧 IP:\\n${old_ip}\\n\\n新 IP:\\n${current_ip}\\n\\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
             send_telegram "$message"
             send_dingtalk "$message"
             echo "$current_ip" > "$ip_file"
@@ -340,7 +304,7 @@ send_boot_notification() {
     local hostname=$(hostname)
     local ip_info=$(get_ip)
     local time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-    local message="VPS:\n✅ VPS 已上線 [成功]\n\n📝 備註: ${REMARK:-未設置}\n\n🖥️ 主機名: $hostname\n\n🌐 公網IP:\n$ip_info\n\n🕒 時間: $time"
+    local message="VPS:\\n✅ VPS 已上線 [成功]\\n\\n📝 備註: ${REMARK:-未設置}\\n\\n🖥️ 主機名: ${hostname}\\n\\n🌐 公網IP:\\n${ip_info}\\n\\n🕒 時間: ${time}"
     send_telegram "$message"
     send_dingtalk "$message"
     log "Boot notification sent"
@@ -352,7 +316,7 @@ send_ssh_notification() {
     local ip="$2"
     local hostname=$(hostname)
     local time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-    local message="VPS:\n🔐 SSH 登录 [登录]\n\n📝 備註: ${REMARK:-未設置}\n\n👤 用户: $user\n\n🖥️ 主机: $hostname\n\n🌐 来源 IP: $ip\n\n🕒 時間: $time"
+    local message="VPS:\\n🔐 SSH 登录 [登录]\\n\\n📝 備註: ${REMARK:-未設置}\\n\\n👤 用户: ${user}\\n\\n🖥️ 主机: ${hostname}\\n\\n🌐 来源 IP: ${ip}\\n\\n🕒 時間: ${time}"
     send_telegram "$message"
     send_dingtalk "$message"
     log "SSH login notification sent: $user from $ip"
@@ -376,7 +340,6 @@ install() {
     install_dependencies
     load_config
     echo "开始安装 VPS Notify..."
-    # Configure systemd service
     cat > /etc/systemd/system/vps_notify.service << EOL
 [Unit]
 Description=VPS Notify Boot Service
@@ -389,9 +352,7 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOL
     systemctl enable vps_notify.service
-    # Configure cron job
     echo "*/5 * * * * root /bin/bash $PWD/tgvsdd2.sh monitor" > /etc/cron.d/vps_notify
-    # Configure SSH login notification
     echo "session optional pam_exec.so /bin/bash $PWD/tgvsdd2.sh ssh" >> /etc/pam.d/sshd
     save_config
     log "Installation completed"
@@ -522,13 +483,13 @@ test_notifications() {
                 echo -e "${GREEN}SSH 登录通知已发送${NC}"
                 ;;
             3)
-                local message="VPS:\n⚠️ 测试资源警报 [警告]\n\n📊 内存使用率: 85%\n\n📈 CPU 使用率: 90%\n\n💾 磁盘使用率: 95%\n\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                local message="VPS:\\n⚠️ 测试资源警报 [警告]\\n\\n📊 内存使用率: 85%\\n\\n📈 CPU 使用率: 90%\\n\\n💾 磁盘使用率: 95%\\n\\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
                 send_telegram "$message"
                 send_dingtalk "$message"
                 echo -e "${GREEN}资源警报已发送${NC}"
                 ;;
             4)
-                local message="VPS:\n🌐 测试 IP 变动 [网络]\n\n📝 备注: ${REMARK:-未设置}\n\n🖥️ 主机名: $(hostname)\n\n旧 IP:\nIPv4: 192.168.1.1\n\n新 IP:\n$(get_ip)\n\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                local message="VPS:\\n🌐 测试 IP 变动 [网络]\\n\\n📝 备注: ${REMARK:-未设置}\\n\\n🖥️ 主机名: $(hostname)\\n\\n旧 IP:\\nIPv4: 192.168.1.1\\n\\n新 IP:\\n$(get_ip)\\n\\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
                 send_telegram "$message"
                 send_dingtalk "$message"
                 echo -e "${GREEN}IP 变动通知已发送${NC}"
@@ -562,13 +523,13 @@ check_status() {
         echo -e "${RED}SSH 通知: 未启用${NC}"
     fi
     echo -e "\n最近日志:"
-    tail - फ़ॉन्ट-फ़ैमिली: नोटो सेरिफ़ बंगाली, सेरिफ़; ">5 "$LOG_FILE"
+    tail -n 5 "$LOG_FILE"
 }
 
 # Main menu
 main_menu() {
     while true; do
-        echo -e "\nVPS Notify 管理菜单 (v2.82)"
+        echo -e "\nVPS Notify 管理菜单 v2.83"
         echo "1. 安装/重新安装"
         echo "2. 配置设置"
         echo "3. 测试通知"
