@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v2.81
+# VPS Notify Script (tgvsdd2.sh) v2.82
 # Purpose: Monitor VPS status (IP, SSH, resources) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 2.81 (2025-05-17)
+# Version: 2.82 (2025-05-17)
 # Changelog:
+# - v2.82: Fixed Telegram validation by relaxing conditions, added retry mechanism, enhanced logging
 # - v2.81: Updated Telegram push to use JSON format with Markdown, \n\n for multiline display, added Emoji support
 # - v2.8: Added retry mechanism to DingTalk validation/sending, enhanced logging, removed invalid tags
 # - v2.7: Enhanced comments, clarified validate_dingtalk logic (no access_token encryption)
@@ -30,7 +31,7 @@ touch "$LOG_FILE"
 # Logging function
 log() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] $1" >> "$LOG_FILE"
+    echo "[$timestamp] $1" >> "$LOG_FILE" 2>/dev/null || echo "[$timestamp] $1" >&2
     # Rotate log if exceeds max size
     if [[ -f "$LOG_FILE" && $(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE") -gt $LOG_MAX_SIZE ]]; then
         mv "$LOG_FILE" "${LOG_FILE}.old"
@@ -43,7 +44,7 @@ log() {
 load_config() {
     if [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-        log "Configuration loaded from $CONFIG_FILE"
+        log "Configuration loaded from $CONFIG_FILE: ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY, TG_CHAT_IDS=$TG_CHAT_IDS"
     else
         # Default values
         ENABLE_TG_NOTIFY=0
@@ -87,20 +88,37 @@ EOL
 
 # Validate Telegram configuration
 validate_telegram() {
-    if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
-        local response=$(curl -s -m 5 "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe")
-        if echo "$response" | grep -q '"ok":true'; then
-            echo "Telegram Bot 验证成功"
-            log "Telegram Bot validation succeeded"
-            return 0
-        else
-            echo "Telegram Bot 验证失败：无效的 Token"
-            log "ERROR: Telegram validation failed: $response"
-            return 1
-        fi
+    local token="$1"
+    if [[ -z "$token" && -n "$TG_BOT_TOKEN" ]]; then
+        token="$TG_BOT_TOKEN"
+    fi
+    if [[ -n "$token" ]]; then
+        local max_attempts=3
+        local attempt=1
+        local response status
+        while [[ $attempt -le $max_attempts ]]; do
+            response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -m 5 "https://api.telegram.org/bot${token}/getMe")
+            status=$(echo "$response" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
+            log "Telegram validation attempt $attempt: curl https://api.telegram.org/bot[hidden]/getMe, HTTP $status"
+            log "Response: $response"
+            if [[ "$status" -eq 200 && "$response" =~ \"ok\":true ]]; then
+                echo "Telegram Bot 验证成功"
+                log "Telegram Bot validation succeeded"
+                return 0
+            else
+                log "ERROR: Telegram validation failed: HTTP $status, response: $response"
+                if [[ $attempt -lt $max_attempts ]]; then
+                    sleep 2
+                    ((attempt++))
+                else
+                    echo "Telegram Bot 验证失败：无效的 Token 或网络问题"
+                    return 1
+                fi
+            fi
+        done
     else
-        echo "Telegram 配置不完整或未启用"
-        log "Telegram configuration incomplete or disabled"
+        echo "Telegram Bot Token 未提供"
+        log "ERROR: Telegram validation skipped: no token provided"
         return 1
     fi
 }
@@ -125,7 +143,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+            url="${webhook}×tamp=${timestamp}&sign=${sign}"
         fi
 
         # Send test message (includes keyword "VPS")
@@ -198,7 +216,7 @@ send_dingtalk() {
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${DINGTALK_WEBHOOK}&timestamp=${timestamp}&sign=${sign}"
+                url="${DINGTALK_WEBHOOK}×tamp=${timestamp}&sign=${sign}"
             fi
 
             response=$(curl -s -m 5 -X POST "$url" \
@@ -435,7 +453,13 @@ configure_settings() {
                 ;;
             2)
                 read -p "请输入 Telegram Bot Token: " TG_BOT_TOKEN
-                validate_telegram && echo -e "${GREEN}Token 有效${NC}" || echo -e "${RED}Token 无效${NC}"
+                if validate_telegram "$TG_BOT_TOKEN"; then
+                    echo -e "${GREEN}Token 有效${NC}"
+                    ENABLE_TG_NOTIFY=1
+                else
+                    echo -e "${RED}Token 无效${NC}"
+                    TG_BOT_TOKEN=""
+                fi
                 ;;
             3)
                 read -p "请输入 Telegram Chat IDs (逗号分隔): " TG_CHAT_IDS
@@ -538,13 +562,13 @@ check_status() {
         echo -e "${RED}SSH 通知: 未启用${NC}"
     fi
     echo -e "\n最近日志:"
-    tail -n 5 "$LOG_FILE"
+    tail - फ़ॉन्ट-फ़ैमिली: नोटो सेरिफ़ बंगाली, सेरिफ़; ">5 "$LOG_FILE"
 }
 
 # Main menu
 main_menu() {
     while true; do
-        echo -e "\nVPS Notify 管理菜单 (v2.81)"
+        echo -e "\nVPS Notify 管理菜单 (v2.82)"
         echo "1. 安装/重新安装"
         echo "2. 配置设置"
         echo "3. 测试通知"
