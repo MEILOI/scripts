@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.6
+# VPS Notify Script (tgvsdd2.sh) v3.0.7
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.6 (2025-05-17)
+# Version: 3.0.7 (2025-05-17)
 # Changelog:
+# - v3.0.7: Fixed Telegram notification failure (removed parse_mode=HTML and <br>, restored plain text with \n), restored emoji (✅, 🔐, ⚠️, 🌐), added TG_EMOJI and TG_PARSE_MODE configs
 # - v3.0.6: Fixed Telegram notification not showing (sanitize HTML, remove emoji, add retry with plain text), enhanced error checking, added debug mode
 # - v3.0.5: Fixed Telegram newline (use parse_mode=HTML with <br>), enhanced API response logging
 # - v3.0.4: Fixed Telegram newline (use parse_mode=MarkdownV2, escape special chars), added API response logging
@@ -26,6 +27,8 @@ LOG_FILE="/var/log/vps_notify.log"
 LOG_MAX_SIZE=$((1024*1024)) # 1MB
 LOG_RETENTION_DAYS=7
 DEBUG_TG=0 # Debug mode for Telegram (1=enabled, 0=disabled)
+TG_EMOJI=1 # Enable emoji in Telegram messages (1=enabled, 0=disabled)
+TG_PARSE_MODE="plain" # Telegram parse mode (plain, html)
 
 # Logging function
 log() {
@@ -108,6 +111,8 @@ load_config() {
         ALERT_INTERVAL=6
         REMARK=""
         DEBUG_TG=0
+        TG_EMOJI=1
+        TG_PARSE_MODE="plain"
         log "Configuration file not found, using defaults"
     fi
 }
@@ -132,6 +137,8 @@ ENABLE_NETWORK_MONITOR=$ENABLE_NETWORK_MONITOR
 ALERT_INTERVAL=$ALERT_INTERVAL
 REMARK="$REMARK"
 DEBUG_TG=$DEBUG_TG
+TG_EMOJI=$TG_EMOJI
+TG_PARSE_MODE="$TG_PARSE_MODE"
 EOL
     log "Configuration saved to $CONFIG_FILE"
 }
@@ -193,7 +200,7 @@ validate_dingtalk() {
             return 0
         else
             log "ERROR: DingTalk validation failed on attempt $attempt for $masked_webhook: errcode=$errcode, errmsg=$errmsg"
-            if [[ $attempt -lt $max_attempts ]]; then
+            if [[ $attempt -lta max_attempts ]]; then
                 sleep 2
                 ((attempt++))
             else
@@ -229,56 +236,43 @@ validate_input() {
                 fi
             done
             ;;
+        parse_mode)
+            if [[ "$value" != "plain" && "$value" != "html" ]]; then
+                echo -e "${RED}错误：Parse mode 必须为 plain 或 html${NC}"
+                return 1
+            fi
+            ;;
     esac
     return 0
-}
-
-# Sanitize message for HTML
-sanitize_html() {
-    local text="$1"
-    # Replace emoji with text
-    text=$(echo "$text" | sed 's/✅/[成功]/g; s/🔐/[登录]/g; s/⚠️/[警告]/g; s/🌐/[网络]/g')
-    # Replace \n with <br>
-    text=$(echo "$text" | sed 's/\\n/<br>/g')
-    # Escape special characters for HTML
-    echo "$text" | sed 's/[&<>]/\\&/g; s/:/\\:/g'
 }
 
 # Send Telegram notification
 send_telegram() {
     local message="$1"
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
-        # Sanitize and convert to HTML
-        local html_message=$(sanitize_html "$message")
+        # Apply emoji if enabled
+        local final_message="$message"
+        if [[ "$TG_EMOJI" -eq 1 ]]; then
+            final_message=$(echo "$message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
+        fi
         if [[ "$DEBUG_TG" -eq 1 ]]; then
             log "DEBUG: Original message: $message"
-            log "DEBUG: HTML message: $html_message"
+            log "DEBUG: Final message: $final_message"
         fi
         for chat_id in ${TG_CHAT_IDS//,/ }; do
-            # Try HTML mode
-            local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                --data-urlencode "chat_id=${chat_id}" \
-                --data-urlencode "text=${html_message}" \
-                --data-urlencode "parse_mode=HTML")
+            local url="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
+            local curl_cmd=(curl -s -m 5 -X POST "$url" --data-urlencode "chat_id=${chat_id}" --data-urlencode "text=$final_message")
+            if [[ "$TG_PARSE_MODE" == "html" ]]; then
+                curl_cmd+=(--data-urlencode "parse_mode=HTML")
+            fi
+            local response=$("${curl_cmd[@]}")
             local is_ok=$(echo "$response" | grep -o '"ok":true')
             local message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
             local error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
             if [[ -n "$is_ok" && -n "$message_id" ]]; then
-                log "Telegram notification sent to $chat_id (message_id: $message_id): $message"
+                log "Telegram notification sent to $chat_id (message_id: $message_id): $final_message"
             else
-                log "ERROR: Failed to send Telegram HTML message to $chat_id: $response (Description: $error_desc)"
-                # Retry with plain text
-                response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                    --data-urlencode "chat_id=${chat_id}" \
-                    --data-urlencode "text=$message")
-                is_ok=$(echo "$response" | grep -o '"ok":true')
-                message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
-                error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
-                if [[ -n "$is_ok" && -n "$message_id" ]]; then
-                    log "Telegram plain text retry succeeded to $chat_id (message_id: $message_id): $message"
-                else
-                    log "ERROR: Failed to send Telegram plain text message to $chat_id: $response (Description: $error_desc)"
-                fi
+                log "ERROR: Failed to send Telegram message to $chat_id: $response (Description: $error_desc)"
             fi
         done
     fi
@@ -373,7 +367,7 @@ monitor_resources() {
         local used=$(echo "$mem_info" | awk '{print $3}')
         local usage=$((100 * used / total))
         if [[ $usage -ge $MEM_THRESHOLD ]]; then
-            message+="内存使用率: ${usage}% 超过阈值 ${MEM_THRESHOLD}%\n"
+            message+="[警告] 内存使用率: ${usage}% 超过阈值 ${MEM_THRESHOLD}%\n"
         fi
     fi
 
@@ -382,7 +376,7 @@ monitor_resources() {
         local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}')
         local usage=$(printf "%.0f" "$cpu_usage")
         if [[ $usage -ge $CPU_THRESHOLD ]]; then
-            message+="CPU 使用率: ${usage}% 超过阈值 ${CPU_THRESHOLD}%\n"
+            message+="[警告] CPU 使用率: ${usage}% 超过阈值 ${CPU_THRESHOLD}%\n"
         fi
     fi
 
@@ -390,7 +384,7 @@ monitor_resources() {
     if [[ "$ENABLE_DISK_MONITOR" -eq 1 ]]; then
         local disk_usage=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
         if [[ $disk_usage -ge $DISK_THRESHOLD ]]; then
-            message+="磁盘使用率: ${disk_usage}% 超过阈值 ${DISK_THRESHOLD}%\n"
+            message+="[警告] 磁盘使用率: ${disk_usage}% 超过阈值 ${DISK_THRESHOLD}%\n"
         fi
     fi
 
@@ -528,11 +522,27 @@ guided_config() {
                 read -p "启用 Telegram 调试模式？(1=是, 0=否): " DEBUG_TG
                 validate_input yes_no "$DEBUG_TG" && break
             done
+            while true; do
+                read -p "启用 Telegram emoji？(1=是, 0=否): " TG_EMOJI
+                validate_input yes_no "$TG_EMOJI" && break
+            done
+            while true; do
+                read -p "Telegram 消息格式 (plain=纯文本, html=HTML): " TG_PARSE_MODE
+                validate_input parse_mode "$TG_PARSE_MODE" && break
+            done
+        else
+            TG_BOT_TOKEN=""
+            TG_CHAT_IDS=""
+            DEBUG_TG=0
+            TG_EMOJI=1
+            TG_PARSE_MODE="plain"
         fi
     else
         TG_BOT_TOKEN=""
         TG_CHAT_IDS=""
         DEBUG_TG=0
+        TG_EMOJI=1
+        TG_PARSE_MODE="plain"
     fi
 
     # DingTalk
@@ -775,7 +785,7 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}║       Version: 3.0.6              ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.7              ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
@@ -783,6 +793,8 @@ main_menu() {
         echo -e "Telegram 通知: ${ENABLE_TG_NOTIFY:-0} (1=Y, 0=N)"
         echo -e "Telegram Chat IDs: ${TG_CHAT_IDS:-未设置}"
         echo -e "Telegram 调试模式: ${DEBUG_TG:-0} (1=Y, 0=N)"
+        echo -e "Telegram Emoji: ${TG_EMOJI:-1} (1=Y, 0=N)"
+        echo -e "Telegram 消息格式: ${TG_PARSE_MODE:-plain}"
         echo -e "DingTalk Webhook: $dt_webhook_display"
         echo -e "DingTalk 通知: ${ENABLE_DINGTALK_NOTIFY:-0} (1=Y, 0=N)"
         echo -e "DingTalk Secret: $dt_secret_display"
