@@ -123,16 +123,50 @@ Telegram：
 
 DingTalk：
 打开钉钉群组，进入“群设置” > “智能群助手” > “自定义机器人”。
-点击“添加机器人”，选择“自定义机器人”。
+检查现有机器人：
+删除所有失效或不相关的机器人（避免 Webhook 混淆）。
+
+
+创建新机器人：
+点击“添加机器人” > 选择“自定义机器人”。
 输入机器人名称（例如“VPS Notify”）。
-选择安全设置：
-推荐：选择“自定义关键词”（输入关键词如“VPS”或“通知”）。
-加签：如果启用，复制 secret（以 SEC 开头），在脚本配置中输入。
-IP 地址：可选，需添加 VPS 公网 IP（运行 curl -s4m 3 ip.sb 获取）。
+选择安全设置（至少选一种）：
+自定义关键词（推荐）：输入关键词如“VPS”或“通知”，消息需包含关键词。
+加签：复制 secret（以 SEC 开头），在脚本配置中输入。
+IP 地址：添加 VPS 公网 IP（运行 curl -s4m 3 ip.sb 获取）。
 
 
 点击“完成”，复制 Webhook URL（格式如 https://oapi.dingtalk.com/robot/send?access_token=xxx）。
-如果 Webhook 失效（例如错误 300005），删除机器人并重新创建。
+注意：只复制完整 Webhook URL，不要仅复制 access_token 或嵌套 URL。
+
+
+验证 Webhook：
+不带加签：curl -s -X POST "https://oapi.dingtalk.com/robot/send?access_token=<你的token>" \
+    -H "Content-Type: application/json" \
+    -d '{"msgtype": "text", "text": {"content": "VPS 测试消息"}}'
+
+
+带加签：timestamp=$(date +%s%3N)
+secret="<你的secret>"
+string_to_sign="${timestamp}\n${secret}"
+sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
+curl -s -X POST "https://oapi.dingtalk.com/robot/send?access_token=<你的token>×tamp=${timestamp}&sign=${sign}" \
+    -H "Content-Type: application/json" \
+    -d '{"msgtype": "text", "text": {"content": "VPS 测试消息"}}'
+
+
+正确返回：{"errcode":0,"errmsg":"ok"}
+群组应收到消息：“VPS 测试消息”。
+
+
+如果 Webhook 失效（例如错误 300005）：
+删除机器人并重新创建。
+确认群组存在且你有权限。
+退出钉钉客户端并重新登录，刷新配置.
+尝试在另一设备（例如手机）创建机器人。
+在新群组中创建机器人测试。
+
+
 
 
 
@@ -155,7 +189,11 @@ Telegram：
 
 
 DingTalk：
-验证 Webhook 是否有效：curl -s -X POST "https://oapi.dingtalk.com/robot/send?access_token=<你的token>" \
+验证 Webhook 是否有效：timestamp=$(date +%s%3N)
+secret="<你的secret>"
+string_to_sign="${timestamp}\n${secret}"
+sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
+curl -s -X POST "https://oapi.dingtalk.com/robot/send?access_token=<你的token>×tamp=${timestamp}&sign=${sign}" \
     -H "Content-Type: application/json" \
     -d '{"msgtype": "text", "text": {"content": "VPS 测试消息"}}'
 
@@ -163,16 +201,55 @@ DingTalk：
 如果使用加签，验证 DINGTALK_SECRET 是否正确：cat /etc/vps_notify.conf | grep DINGTALK_SECRET
 
 
+脚本验证逻辑（validate_dingtalk）：
+使用完整 Webhook URL，不修改 access_token。
+如果启用加签，附加 timestamp 和 sign（HMAC-SHA256）。
+不对 access_token 加密或编码，直接传递。
+
+
 常见错误码：
-300005：token is not exist - Webhook 失效或 token 错误。重新生成 Webhook。
-400：无效的 access_token - 检查 Webhook URL 是否完整。
-403：关键词或 IP 不在白名单 - 确保消息包含关键词（如“VPS”）或添加 VPS IP。
+300005：token is not exist - Webhook 失效、token 错误或 IP 限制：
+确认群组存在且你有权限。
+删除旧机器人，重新创建 Webhook。
+检查 Webhook URL 是否完整（64 位 access_token）。
+确保未输入嵌套 URL（如 access_token=完整的URL）。
+退出钉钉客户端并重新登录，刷新配置。
+尝试在其他群组或设备创建机器人。
+检查 VPS IP 是否被限制：curl -s4m 3 ip.sb
+
+
+从另一设备（例如个人电脑）测试 Webhook。
+添加 VPS IP 到机器人白名单。
+使用代理绕过限制：apt install -y tinyproxy
+
+
+
+
+联系钉钉客服，确认 IP 限制或服务器同步：
+提供 VPS IP、Webhook URL（部分隐藏）、错误信息和测试时间。
+
+
+
+
+400：无效的 access_token - 检查 Webhook URL 是否正确。
+403：关键词或 IP 不在白名单 - 确保消息包含关键词（如“VPS”）或添加 VPS IP：curl -s4m 3 ip.sb
+
+
 310000：消息内容为空或格式错误 - 确保消息包含 content 字段。
 42001：access_token 过期 - 重新生成 Webhook。
-加签错误：签名不匹配 - 验证 DINGTALK_SECRET 和系统时间（需与钉钉服务器同步）。
+加签错误：签名不匹配 - 验证 DINGTALK_SECRET 和系统时间：timedatectl
+ntpdate pool.ntp.org
+
+
 
 
 确保 VPS 可以访问 oapi.dingtalk.com：curl -I https://oapi.dingtalk.com
+
+
+多 VPS 测试：
+在多台 VPS 上测试相同 Webhook，记录每台的 IP 和输出。
+如果所有 VPS 失败，尝试在非 VPS 设备（例如个人电脑）测试。
+如果仅 VPS 失败，可能是 IP 限制或云服务商范围限制。
 
 
 
@@ -202,24 +279,34 @@ IP 获取失败：
 
 
 时间同步（加签相关）：
-确保系统时间与钉钉服务器同步：timedatectl
+确保系统时间与钉钉服务器同步（误差 < 1 小时）：timedatectl
 ntpdate pool.ntp.org
 
 
 
 
+群组权限：
+确认你是钉钉群组管理员。
+如果群组配置异常，创建新群组测试。
+
+
+客户端同步问题：
+退出钉钉客户端并重新登录。
+在另一设备（例如手机）检查机器人配置.
+
+
 其他问题：
 提交 issue 到 GitHub 仓库（meiloi/scripts）。
-提供日志输出和错误信息。
+提供日志输出、Webhook 测试结果和错误信息。
 
 
 
 示例日志
 /var/log/vps_notify.log
-[2025-05-17 10:00:00] Installation completed
-[2025-05-17 10:05:00] Sent boot notification
-[2025-05-17 10:10:00] IP changed from 192.168.1.1 to 192.168.1.2
-[2025-05-17 11:00:00] ERROR: Invalid DingTalk webhook: {"errcode":300005,"errmsg":"token is not exist"}
+[2025-05-17 11:00:00] Installation completed
+[2025-05-17 11:05:00] Sent boot notification
+[2025-05-17 11:10:00] IP changed from 192.168.1.1 to 192.168.1.2
+[2025-05-17 11:15:00] ERROR: Invalid DingTalk webhook: {"errcode":300005,"errmsg":"token is not exist"}
 
 贡献
 欢迎提交 Pull Request 或 Issue 来改进脚本！请遵循以下步骤：
@@ -232,10 +319,34 @@ Fork 仓库。
 
 变更日志
 
-v2.2 (2025-05-17)：
+v2.7 (2025-05-17)：
+更新 README，补充 validate_dingtalk 验证逻辑说明，明确不加密 access_token。
+添加多 VPS 测试指南，优化 300005 错误排查。
+
+
+v2.6：
+补充钉钉 IP 限制的测试方法、代理配置指南和联系客服步骤。
+优化 300005 错误排查，添加 IP 限制场景。
+
+
+v2.5：
+补充加签测试的完整示例、钉钉客户端同步问题排查和 300005 错误的更多场景。
+强调加签请求必须包含 timestamp 和 sign。
+
+
+v2.4：
+补充正确的 Webhook 输入格式、常见输入错误示例（如嵌套 URL）和钉钉机器人管理注意事项。
+优化 300005 错误排查，添加 URL 格式检查。
+
+
+v2.3：
+补充详细钉钉机器人创建步骤、加签调试和 300005 错误的多场景解决方法。
+优化故障排除，添加群组权限和 Webhook 混淆的检查。
+
+
+v2.2：
 新增钉钉加签支持（DINGTALK_SECRET），兼容“加签”安全策略。
 增强 validate_dingtalk 和 send_dingtalk，支持签名验证和详细错误日志。
-更新 README，补充加签配置和时间同步说明。
 
 
 v2.1：
