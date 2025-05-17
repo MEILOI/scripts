@@ -2,6 +2,7 @@
 
 # VPS Notification Script (Advanced Optimized Version)
 # Changes:
+# - Enhanced send_dingtalk function with better error handling, message cleanup, and retry mechanism
 # - Fixed syntax error in get_ip function (missing ) and incorrect URL 'three')
 # - Corrected typos: unload_script -> uninstall_script, menu text
 # - Verified all control structures for proper closure
@@ -104,7 +105,7 @@ validate_dingtalk() {
     if [ -z "$webhook" ]; then
         return 1
     fi
-    response=$(curl -s -X POST "${DINGTALK_API}${webhook}" \
+    response=$(curl -s -m 5 -X POST "${DINGTALK_API}${webhook}" \
         -H "Content-Type: application/json" \
         -d '{"msgtype": "text", "text": {"content": "Test"}}')
     if echo "$response" | grep -q '"errcode":0'; then
@@ -139,27 +140,48 @@ send_tg() {
     done
 }
 
-# 发送 DingTalk 通知
+# 发送 DingTalk 通知（增强版）
 send_dingtalk() {
     local message="$1"
+    local max_retries=2
+    local retry_count=0
+    local response=""
+    
     if [ -z "$DINGTALK_WEBHOOK" ]; then
         echo -e "${RED}错误: DingTalk配置不完整${NC}"
         log_message "ERROR: DingTalk configuration incomplete"
         return 1
     fi
     
-    text=$(echo "$message" | sed 's/\*//g' | sed 's/^\s*//g')
-    response=$(curl -s -X POST "${DINGTALK_API}${DINGTALK_WEBHOOK}" \
-        -H "Content-Type: application/json" \
-        -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"$text\"}}")
-    
-    if ! echo "$response" | grep -q '"errcode":0'; then
-        echo -e "${RED}发送DingTalk通知失败${NC}"
-        log_message "ERROR: Failed to send DingTalk: $response"
-    else
-        echo -e "${GREEN}成功发送DingTalk通知${NC}"
-        log_message "Sent DingTalk notification"
+    # 清理消息：移除 Markdown 标记和特殊字符
+    text=$(echo "$message" | sed 's/\*//g' | sed 's/^\s*//g' | sed 's/[\x00-\x1F\x7F]//g' | tr -d '\r\n' | sed 's/"/\\"/g')
+    if [ -z "$text" ]; then
+        echo -e "${RED}错误: DingTalk消息内容为空${NC}"
+        log_message "ERROR: DingTalk message content is empty"
+        return 1
     fi
+    
+    # 重试机制
+    while [ $retry_count -le $max_retries ]; do
+        response=$(curl -s -m 5 -X POST "${DINGTALK_API}${DINGTALK_WEBHOOK}" \
+            -H "Content-Type: application/json" \
+            -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"$text\"}}")
+        
+        if echo "$response" | grep -q '"errcode":0'; then
+            echo -e "${GREEN}成功发送DingTalk通知${NC}"
+            log_message "Sent DingTalk notification"
+            return 0
+        else
+            echo -e "${RED}发送DingTalk通知失败 (尝试 $((retry_count + 1))/${max_retries})${NC}"
+            log_message "ERROR: Failed to send DingTalk: $response"
+            retry_count=$((retry_count + 1))
+            sleep 1
+        fi
+    done
+    
+    echo -e "${RED}发送DingTalk通知失败，已达最大重试次数${NC}"
+    log_message "ERROR: DingTalk notification failed after $max_retries retries: $response"
+    return 1
 }
 
 # 统一发送通知
@@ -169,6 +191,7 @@ send_notification() {
     [ "$ENABLE_DINGTALK_NOTIFY" = "Y" ] && send_dingtalk "$message"
 }
 
+# 以下函数保持不变（为节省空间，仅列出关键部分，完整脚本与之前一致）
 # VPS 上线通知
 notify_boot() {
     ip_info=$(get_ip)
