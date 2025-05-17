@@ -3,7 +3,7 @@
 # VPS Notify Script (tgvsdd2.sh)
 # Version: 3.0.3 (2025-05-17)
 # Purpose: Advanced VPS notification system with Telegram integration
-# Fixes: CPU 100% bug, menu display, Telegram newlines, compatibility
+# Fixes: CPU 100% bug, configuration guide, menu display, Telegram newlines, compatibility
 
 # Configuration
 LOG_FILE="/var/log/vps_notify.log"
@@ -12,15 +12,6 @@ TG_BOT_TOKEN=""
 TG_CHAT_ID=""
 SCRIPT_NAME="tgvsdd2.sh"
 VERSION="3.0.3"
-
-# Load configuration
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-fi
-
-# Override with environment variables if set
-TG_BOT_TOKEN=${TG_BOT_TOKEN:-$TG_BOT_TOKEN}
-TG_CHAT_ID=${TG_CHAT_ID:-$TG_CHAT_ID}
 
 # Log function
 log() {
@@ -35,7 +26,6 @@ escape_markdown() {
 # Send Telegram notification
 send_telegram() {
     local message="$1"
-    # Replace \n with \n\n for proper newlines
     local final_message=$(echo "$message" | sed 's/\\n/\\n\\n/g')
     local escaped_message=$(escape_markdown "$final_message")
     local json_payload=$(printf '{"chat_id":"%s","text":"%s","parse_mode":"MarkdownV2"}' "$TG_CHAT_ID" "$escaped_message")
@@ -86,7 +76,7 @@ main_menu() {
     echo "║       Version: $VERSION           ║"
     echo "════════════════════════════════════════"
     echo "1. 安装/重新安装"
-    echo "2. 配置设置"
+    echo "2. 配置 Telegram"
     echo "3. 测试通知"
     echo "4. 启动监控"
     echo "0. 退出"
@@ -98,12 +88,17 @@ main_menu() {
         3) test_notification ;;
         4) monitor ;;
         0) log "Script exited by user" ; exit 0 ;;
-        *) echo "无效选项" ; sleep 1 ; main_menu ;;
+        *) echo "无效选项，请输入 0-4" ; sleep 1 ; main_menu ;;
     esac
 }
 
 # Test notification
 test_notification() {
+    if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+        echo "未配置 Telegram，请先配置"
+        sleep 1
+        configure
+    fi
     boot_notification "Test"
     echo "测试通知已发送，请检查 Telegram"
     sleep 2
@@ -112,10 +107,16 @@ test_notification() {
 
 # Monitor function (fixed CPU 100% bug)
 monitor() {
+    if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+        echo "未配置 Telegram，请先配置"
+        sleep 1
+        configure
+    fi
     local max_runs=360  # 1 hour at 10s intervals
     local count=0
     local last_status="online"
     log "Monitor started"
+    echo "监控已启动（运行 1 小时后自动停止）"
     while [ $count -lt $max_runs ]; do
         local status
         status=$(curl -s --max-time 5 http://ipinfo.io/ip 2>/dev/null || echo "offline")
@@ -136,8 +137,40 @@ monitor() {
     main_menu
 }
 
+# Install dependencies
+install_deps() {
+    local missing=""
+    for cmd in curl sed date hostname; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing="$missing $cmd"
+        fi
+    done
+    if [ -n "$missing" ]; then
+        log "Installing dependencies:$missing"
+        if command -v apt >/dev/null 2>&1; then
+            echo "检测到 Debian 系统，正在安装依赖..."
+            apt update >/dev/null 2>&1
+            apt install -y curl sed coreutils >/dev/null 2>&1
+        elif command -v apk >/dev/null 2>&1; then
+            echo "检测到 Alpine 系统，正在安装依赖..."
+            apk update >/dev/null 2>&1
+            apk add curl sed coreutils >/dev/null 2>&1
+        else
+            log "Error: Unsupported package manager"
+            echo "错误：不支持的包管理器，请手动安装：$missing"
+            exit 1
+        fi
+    fi
+    log "Dependencies checked"
+}
+
 # Install service (Debian/Alpine compatible)
 install_service() {
+    if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+        echo "未配置 Telegram，请先配置"
+        sleep 1
+        configure
+    fi
     if command -v systemctl >/dev/null 2>&1; then
         cat > /etc/systemd/system/vps-notify.service << EOF
 [Unit]
@@ -189,32 +222,75 @@ EOF
     main_menu
 }
 
-# Configure settings
+# Configure Telegram
 configure() {
-    echo "请编辑 $CONFIG_FILE 设置 Telegram 参数："
-    echo "TG_BOT_TOKEN=\"您的 Bot Token\""
-    echo "TG_CHAT_ID=\"您的 Chat ID\""
-    echo "按 Enter 继续..."
-    read -r
-    nano "$CONFIG_FILE" 2>/dev/null || vi "$CONFIG_FILE" 2>/dev/null || echo "请手动编辑 $CONFIG_FILE"
-    log "Configuration edited"
+    clear
+    echo "════════════════════════════════════════"
+    echo "║       配置 Telegram 参数       ║"
+    echo "════════════════════════════════════════"
+    echo "请按照以下步骤获取参数："
+    echo "1. 打开 Telegram，搜索 @BotFather"
+    echo "2. 发送 /newbot 创建机器人，获取 TG_BOT_TOKEN"
+    echo "3. 搜索 @userinfobot 获取 TG_CHAT_ID"
+    echo ""
+    if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
+        echo "当前配置："
+        echo "TG_BOT_TOKEN: $TG_BOT_TOKEN"
+        echo "TG_CHAT_ID: $TG_CHAT_ID"
+        echo "是否修改？(y/n)"
+        read -r modify
+        if [ "$modify" != "y" ]; then
+            log "Configuration unchanged"
+            main_menu
+            return
+        fi
+    fi
+    echo "请输入 TG_BOT_TOKEN："
+    read -r token
+    echo "请输入 TG_CHAT_ID："
+    read -r chat_id
+    if [ -z "$token" ] || [ -z "$chat_id" ]; then
+        log "Error: Invalid Telegram configuration"
+        echo "错误：Token 或 Chat ID 不能为空"
+        sleep 1
+        configure
+        return
+    fi
+    echo "TG_BOT_TOKEN=\"$token\"" > "$CONFIG_FILE"
+    echo "TG_CHAT_ID=\"$chat_id\"" >> "$CONFIG_FILE"
+    TG_BOT_TOKEN="$token"
+    TG_CHAT_ID="$chat_id"
+    log "Configuration saved: TG_BOT_TOKEN=$token, TG_CHAT_ID=$chat_id"
+    echo "配置已保存到 $CONFIG_FILE"
+    sleep 2
     main_menu
 }
 
-# Check dependencies
-check_deps() {
-    local missing=""
-    for cmd in curl sed date hostname; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            missing="$missing $cmd"
-        fi
-    done
-    if [ -n "$missing" ]; then
-        log "Error: Missing dependencies:$missing"
-        echo "错误：缺少依赖：$missing"
-        echo "请安装：apt install -y curl sed coreutils"
-        exit 1
+# One-key installation
+one_key_install() {
+    log "One-key installation started"
+    echo "正在执行一键安装..."
+
+    # Install dependencies
+    install_deps
+
+    # Sync time
+    sync_time
+
+    # Configure Telegram
+    if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+        echo "未检测到 Telegram 配置，正在引导配置..."
+        configure
     fi
+
+    # Install service
+    install_service
+
+    # Test notification
+    boot_notification "安装完成"
+    echo "一键安装完成！测试通知已发送"
+    sleep 2
+    main_menu
 }
 
 # Main function
@@ -225,26 +301,12 @@ main() {
     chmod 666 "$LOG_FILE" 2>/dev/null
     log "Script started: $SCRIPT_NAME v$VERSION"
 
-    # Check dependencies
-    check_deps
-
-    # Sync time
-    sync_time
-
-    # Check Telegram configuration
-    if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
-        log "Error: TG_BOT_TOKEN or TG_CHAT_ID not set"
-        echo "错误：未设置 TG_BOT_TOKEN 或 TG_CHAT_ID"
-        echo "请编辑 $CONFIG_FILE"
-        exit 1
-    fi
-
     # Handle arguments
     case "$1" in
         menu) main_menu ;;
         test) test_notification ;;
         monitor) monitor ;;
-        "") boot_notification "香港" ;;
+        "") one_key_install ;;
         *) echo "用法: $0 [menu|test|monitor]" ; exit 1 ;;
     esac
 }
