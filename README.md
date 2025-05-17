@@ -1,6 +1,6 @@
 VPS Notify (tgvsdd2.sh)
 
-tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 和 DingTalk 通知，帮助用户实时监控 VPS 的 IP 变动、SSH 登录、系统资源使用情况以及开机状态。相比早期版本（tgvsdd1.sh），本脚本增加了多渠道通知、交互式菜单、自动化安装、更新功能、钉钉加签支持和更健壮的错误处理，适合 Linux VPS（Debian/Ubuntu/CentOS 等）。
+tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 和 DingTalk 通知，帮助用户实时监控 VPS 的 IP 变动、SSH 登录、系统资源使用情况以及开机状态。相比早期版本（tgvsdd1.sh），本脚本增加了多渠道通知、交互式彩色菜单、自动化安装、更新功能、钉钉加签支持和更健壮的错误处理，适合 Linux VPS（Debian/Ubuntu/CentOS 等）。
 功能特性
 
 多渠道通知：
@@ -9,7 +9,7 @@ tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 
 
 
 公网 IP 监控：
-实时获取 IPv4 和 IPv6 地址，使用多个后备服务（ip.sb、ifconfig.me、ipinfo.io、ipify.org）。
+实时获取 IPv4 和 IPv6 地址，使用多个后备服务（ip.sb、ifconfig.me、ipinfo.io、api.ipify.org）。
 检测 IP 变动并发送通知。
 
 
@@ -18,8 +18,9 @@ tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 
 限制警报频率（6小时内不重复），避免通知轰炸。
 
 
-交互式菜单：
-用户友好的彩色界面，支持安装、配置、测试通知、检查状态、卸载和更新脚本。
+交互式彩色菜单：
+用户友好的彩色界面（黄色标题，绿色选项），支持安装、配置、测试通知、检查状态、卸载和更新脚本。
+自动检测终端颜色支持，提示设置 TERM=xterm-256color。
 
 
 自动化安装：
@@ -31,6 +32,7 @@ tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 
 日志管理：
 记录所有操作和错误到 /var/log/vps_notify.log。
 自动归档日志，限制大小为 1MB。
+屏蔽敏感信息（如 DingTalk access_token）。
 
 
 灵活配置：
@@ -55,7 +57,7 @@ tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 
 下载并运行脚本：
 curl -o tgvsdd2.sh -fsSL https://raw.githubusercontent.com/meiloi/scripts/main/tgvsdd2.sh && chmod +x tgvsdd2.sh && ./tgvsdd2.sh
 
-这将下载脚本、设置可执行权限并启动交互式菜单。
+这将下载脚本、设置可执行权限并启动交互式彩色菜单。
 
 选择安装：
 
@@ -77,7 +79,7 @@ curl -o tgvsdd2.sh -fsSL https://raw.githubusercontent.com/meiloi/scripts/main/t
 
 
 使用说明
-交互式菜单
+交互式彩色菜单
 运行 ./tgvsdd2.sh 进入主菜单，支持以下选项：
 
 1. 安装/重新安装：配置并安装脚本。
@@ -87,6 +89,10 @@ curl -o tgvsdd2.sh -fsSL https://raw.githubusercontent.com/meiloi/scripts/main/t
 5. 卸载：删除脚本和所有相关文件。
 6. 更新脚本：从 GitHub 下载最新版本，保留配置和服务。
 0. 退出：退出脚本。
+
+菜单使用黄色标题和绿色选项编号，确保直观易读。如果菜单无颜色，运行：
+export TERM=xterm-256color
+./tgvsdd2.sh
 
 命令行模式
 支持以下命令：
@@ -159,37 +165,64 @@ curl -s -X POST "https://oapi.dingtalk.com/robot/send?access_token=<你的token>
 群组应收到消息：“VPS 测试消息”。
 
 
-如果 Webhook 失效（例如错误 300005）：
-删除机器人并重新创建。
-确认群组存在且你有权限。
-退出钉钉客户端并重新登录，刷新配置.
-尝试在另一设备（例如手机）创建机器人。
-在新群组中创建机器人测试。
-
-
 
 
 
 故障排除
 
+彩色菜单不显示：
+检查终端类型：echo $TERM
+
+
+应为 xterm-256color 或类似。若不支持，设置：export TERM=xterm-256color
+
+
+永久设置：echo "export TERM=xterm-256color" >> ~/.bashrc
+source ~/.bashrc
+
+
+
+
+检查终端颜色支持：tput colors
+
+
+应返回 256 或 8。
+
+
+确认 SSH 客户端（例如 PuTTY、OpenSSH）启用颜色：
+PuTTY：设置 > 连接 > 数据 > 终端类型为 xterm-256color。
+
+
+测试颜色：echo -e "\033[0;32m绿色测试\033[0m"
+
+
+
+
 语法错误：
-运行 bash -n tgvsdd2.sh 检查语法。
-确保脚本从 GitHub 下载完整，未被截断。
+运行 bash -n tgvsdd2.sh 检查语法：bash -n tgvsdd2.sh
+
+
+如果报错，确保脚本不包含非法标记：grep -n "<xaiArtifact" tgvsdd2.sh
+
+
+下载正确版本：curl -o tgvsdd2.sh -fsSL https://raw.githubusercontent.com/meiloi/scripts/main/tgvsdd2.sh
+
+
 
 
 通知失败：
-检查 /var/log/vps_notify.log 中的错误信息：cat /var/log/vps_notify.log | grep ERROR
+检查 /var/log/vps_notify.log：cat /var/log/vps_notify.log | grep ERROR
 
 
 Telegram：
-验证 Token 和 Chat ID 是否正确。
-确保 VPS 可以访问 api.telegram.org：curl -I https://api.telegram.org
+验证 Token 和 Chat ID。
+确保 VPS 可访问 api.telegram.org：curl -I https://api.telegram.org
 
 
 
 
 DingTalk：
-验证 Webhook 是否有效：timestamp=$(date +%s%3N)
+验证 Webhook：timestamp=$(date +%s%3N)
 secret="<你的secret>"
 string_to_sign="${timestamp}\n${secret}"
 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
@@ -198,58 +231,20 @@ curl -s -X POST "https://oapi.dingtalk.com/robot/send?access_token=<你的token>
     -d '{"msgtype": "text", "text": {"content": "VPS 测试消息"}}'
 
 
-如果使用加签，验证 DINGTALK_SECRET 是否正确：cat /etc/vps_notify.conf | grep DINGTALK_SECRET
+检查 DINGTALK_SECRET：cat /etc/vps_notify.conf | grep DINGTALK_SECRET
 
 
-脚本验证逻辑（validate_dingtalk）：
-使用完整 Webhook URL，不修改 access_token。
-如果启用加签，附加 timestamp 和 sign（HMAC-SHA256）。
-不对 access_token 加密或编码，直接传递。
-
-
-常见错误码：
-300005：token is not exist - Webhook 失效、token 错误或 IP 限制：
+常见错误：
+300005：token is not exist - Webhook 失效或 IP 限制：
+删除并重新创建机器人。
 确认群组存在且你有权限。
-删除旧机器人，重新创建 Webhook。
-检查 Webhook URL 是否完整（64 位 access_token）。
-确保未输入嵌套 URL（如 access_token=完整的URL）。
-退出钉钉客户端并重新登录，刷新配置。
-尝试在其他群组或设备创建机器人。
-检查 VPS IP 是否被限制：curl -s4m 3 ip.sb
+检查 VPS IP：curl -s4m 3 ip.sb
 
 
-从另一设备（例如个人电脑）测试 Webhook。
-添加 VPS IP 到机器人白名单。
-使用代理绕过限制：apt install -y tinyproxy
+从个人设备测试 Webhook。
+联系钉钉客服，提供 IP、Webhook（部分隐藏）、错误和测试时间。
 
 
-
-
-联系钉钉客服，确认 IP 限制或服务器同步：
-提供 VPS IP、Webhook URL（部分隐藏）、错误信息和测试时间。
-
-
-
-
-400：无效的 access_token - 检查 Webhook URL 是否正确。
-403：关键词或 IP 不在白名单 - 确保消息包含关键词（如“VPS”）或添加 VPS IP：curl -s4m 3 ip.sb
-
-
-310000：消息内容为空或格式错误 - 确保消息包含 content 字段。
-42001：access_token 过期 - 重新生成 Webhook。
-加签错误：签名不匹配 - 验证 DINGTALK_SECRET 和系统时间：timedatectl
-ntpdate pool.ntp.org
-
-
-
-
-确保 VPS 可以访问 oapi.dingtalk.com：curl -I https://oapi.dingtalk.com
-
-
-多 VPS 测试：
-在多台 VPS 上测试相同 Webhook，记录每台的 IP 和输出。
-如果所有 VPS 失败，尝试在非 VPS 设备（例如个人电脑）测试。
-如果仅 VPS 失败，可能是 IP 限制或云服务商范围限制。
 
 
 
@@ -262,107 +257,60 @@ ntpdate pool.ntp.org
 
 
 
-IP 获取失败：
-检查网络连接：curl -s4m 3 ip.sb
-
-
-确保 VPS 支持 IPv4/IPv6（视需求）。
-
-
-更新脚本失败：
-检查 GitHub 连通性：curl -I https://raw.githubusercontent.com/meiloi/scripts/main/tgvsdd2.sh
-
-
-查看日志：cat /var/log/vps_notify.log | grep update
-
-
-
-
 时间同步（加签相关）：
-确保系统时间与钉钉服务器同步（误差 < 1 小时）：timedatectl
+确保系统时间同步：timedatectl
 ntpdate pool.ntp.org
 
 
 
 
-群组权限：
-确认你是钉钉群组管理员。
-如果群组配置异常，创建新群组测试。
-
-
-客户端同步问题：
-退出钉钉客户端并重新登录。
-在另一设备（例如手机）检查机器人配置.
-
-
-其他问题：
-提交 issue 到 GitHub 仓库（meiloi/scripts）。
-提供日志输出、Webhook 测试结果和错误信息。
-
-
 
 示例日志
 /var/log/vps_notify.log
-[2025-05-17 11:00:00] Installation completed
-[2025-05-17 11:05:00] Sent boot notification
-[2025-05-17 11:10:00] IP changed from 192.168.1.1 to 192.168.1.2
-[2025-05-17 11:15:00] ERROR: Invalid DingTalk webhook: {"errcode":300005,"errmsg":"token is not exist"}
+[2025-05-17 11:47:00] Color support enabled (TERM=xterm-256color)
+[2025-05-17 11:47:00] Installation completed
+[2025-05-17 11:48:00] DingTalk notification sent on attempt 1 for https://oapi.dingtalk.com/robot/send?access_token=[hidden]: ...
 
 贡献
-欢迎提交 Pull Request 或 Issue 来改进脚本！请遵循以下步骤：
+欢迎提交 Pull Request 或 Issue！步骤：
 
 Fork 仓库。
-创建新分支（git checkout -b feature/xxx）。
+创建分支（git checkout -b feature/xxx）。
 提交更改（git commit -m "Add xxx feature"）。
 推送分支（git push origin feature/xxx）。
-创建 Pull Request。
+创建 Pull Request。注意：确保脚本仅包含纯 Bash 代码，无非法标记。
 
 变更日志
 
-v2.7 (2025-05-17)：
-更新 README，补充 validate_dingtalk 验证逻辑说明，明确不加密 access_token。
-添加多 VPS 测试指南，优化 300005 错误排查。
+v2.9 (2025-05-17)：
+增强彩色菜单（黄色标题，绿色选项编号）。
+添加终端颜色支持检测，提示设置 TERM=xterm-256color。
+优化日志，记录颜色支持状态。
 
 
-v2.6：
-补充钉钉 IP 限制的测试方法、代理配置指南和联系客服步骤。
-优化 300005 错误排查，添加 IP 限制场景。
+v2.8：
+添加 DingTalk 验证/发送重试机制（3 次）。
+增强日志，屏蔽 access_token。
 
 
-v2.5：
-补充加签测试的完整示例、钉钉客户端同步问题排查和 300005 错误的更多场景。
-强调加签请求必须包含 timestamp 和 sign。
-
-
-v2.4：
-补充正确的 Webhook 输入格式、常见输入错误示例（如嵌套 URL）和钉钉机器人管理注意事项。
-优化 300005 错误排查，添加 URL 格式检查。
-
-
-v2.3：
-补充详细钉钉机器人创建步骤、加签调试和 300005 错误的多场景解决方法。
-优化故障排除，添加群组权限和 Webhook 混淆的检查。
+v2.7：
+补充 validate_dingtalk 逻辑说明。
 
 
 v2.2：
-新增钉钉加签支持（DINGTALK_SECRET），兼容“加签”安全策略。
-增强 validate_dingtalk 和 send_dingtalk，支持签名验证和详细错误日志。
+新增钉钉加签支持。
 
 
 v2.1：
-新增“更新脚本”功能（菜单选项 6），支持从 GitHub 自动下载最新版本。
-增强钉钉通知错误处理，添加重试机制和详细日志。
+新增脚本更新功能。
 
 
 v2.0：
-初始优化版本，修复 get_ip 语法错误，添加交互式菜单和多渠道通知。
+初始优化版本，添加菜单和多渠道通知。
 
 
 
 许可
-本项目采用 MIT 许可证。使用时请遵守相关法律法规，脚本仅限学习和个人使用。
+本项目采用 MIT 许可证。仅限学习和个人使用。
 致谢
-
-感谢所有测试和反馈的用户。
-灵感来源于社区的 VPS 监控脚本项目。
-
+感谢所有测试和反馈的用户！
