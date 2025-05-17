@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v2.8
+# VPS Notify Script (tgvsdd2.sh) v2.81
 # Purpose: Monitor VPS status (IP, SSH, resources) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 2.8 (2025-05-17)
+# Version: 2.81 (2025-05-17)
 # Changelog:
+# - v2.81: Updated Telegram push to use JSON format with Markdown, \n\n for multiline display, added Emoji support
 # - v2.8: Added retry mechanism to DingTalk validation/sending, enhanced logging, removed invalid tags
 # - v2.7: Enhanced comments, clarified validate_dingtalk logic (no access_token encryption)
 # - v2.2: Added DingTalk signed request support
@@ -40,8 +41,9 @@ log() {
 
 # Load configuration
 load_config() {
-    if [[ -f "$CONFIG_FILE" ]]; then
+    if [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
+        log "Configuration loaded from $CONFIG_FILE"
     else
         # Default values
         ENABLE_TG_NOTIFY=0
@@ -58,7 +60,7 @@ load_config() {
         ENABLE_DISK_MONITOR=1
         DISK_THRESHOLD=80
         REMARK=""
-        log "Configuration file not found, using defaults"
+        log "Configuration file not found or not readable, using defaults"
     fi
 }
 
@@ -89,6 +91,7 @@ validate_telegram() {
         local response=$(curl -s -m 5 "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe")
         if echo "$response" | grep -q '"ok":true'; then
             echo "Telegram Bot 验证成功"
+            log "Telegram Bot validation succeeded"
             return 0
         else
             echo "Telegram Bot 验证失败：无效的 Token"
@@ -97,6 +100,7 @@ validate_telegram() {
         fi
     else
         echo "Telegram 配置不完整或未启用"
+        log "Telegram configuration incomplete or disabled"
         return 1
     fi
 }
@@ -121,7 +125,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}×tamp=${timestamp}&sign=${sign}"
+            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
         fi
 
         # Send test message (includes keyword "VPS")
@@ -153,14 +157,25 @@ validate_dingtalk() {
 send_telegram() {
     local message="$1"
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
+        local final_message="$message"
+        # Replace tags with Emoji
+        final_message=$(echo "$final_message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
+        # Enhance line breaks: single \n to \n\n
+        final_message=$(echo "$final_message" | sed 's/\\n/\\n\\n/g')
+        # Escape Markdown special characters
+        final_message=$(echo "$final_message" | sed 's/[_*[\]()~`>#+=|{}.!]/\\&/g')
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                -d "chat_id=${chat_id}&text=${message}")
-            if ! echo "$response" | grep -q '"ok":true'; then
+                -H "Content-Type: application/json" \
+                -d "{\"chat_id\": \"${chat_id}\", \"text\": \"${final_message}\", \"parse_mode\": \"Markdown\"}")
+            if echo "$response" | grep -q '"ok":true'; then
+                log "Telegram notification sent to $chat_id: $final_message"
+            else
                 log "ERROR: Failed to send Telegram message to $chat_id: $response"
             fi
         done
-        log "Telegram notification sent: $message"
+    else
+        log "Telegram notification skipped: ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY, TG_BOT_TOKEN=$TG_BOT_TOKEN, TG_CHAT_IDS=$TG_CHAT_IDS"
     fi
 }
 
@@ -183,7 +198,7 @@ send_dingtalk() {
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${DINGTALK_WEBHOOK}×tamp=${timestamp}&sign=${sign}"
+                url="${DINGTALK_WEBHOOK}&timestamp=${timestamp}&sign=${sign}"
             fi
 
             response=$(curl -s -m 5 -X POST "$url" \
@@ -253,7 +268,7 @@ monitor_resources() {
         local used=$(echo "$mem_info" | awk '{print $3}')
         local usage=$((100 * used / total))
         if [[ $usage -ge $MEM_THRESHOLD ]]; then
-            message+="内存使用率: ${usage}% (超过阈值 ${MEM_THRESHOLD}%)\n"
+            message+="📊 内存使用率: ${usage}% (超过阈值 ${MEM_THRESHOLD}%)\n\n"
         fi
     fi
 
@@ -262,7 +277,7 @@ monitor_resources() {
         local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}')
         local usage=$(printf "%.0f" "$cpu_usage")
         if [[ $usage -ge $CPU_THRESHOLD ]]; then
-            message+="CPU 使用率: ${usage}% (超过阈值 ${CPU_THRESHOLD}%)\n"
+            message+="📈 CPU 使用率: ${usage}% (超过阈值 ${CPU_THRESHOLD}%)\n\n"
         fi
     fi
 
@@ -270,15 +285,16 @@ monitor_resources() {
     if [[ "$ENABLE_DISK_MONITOR" -eq 1 ]]; then
         local disk_usage=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
         if [[ $disk_usage -ge $DISK_THRESHOLD ]]; then
-            message+="磁盘使用率: ${disk_usage}% (超过阈值 ${DISK_THRESHOLD}%)\n"
+            message+="💾 磁盘使用率: ${disk_usage}% (超过阈值 ${DISK_THRESHOLD}%)\n\n"
         fi
     fi
 
     if [[ -n "$message" ]]; then
-        message="⚠️ 资源警报\n$message时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+        message="⚠️ 资源警报 [警告]\n\n$message🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
         send_telegram "$message"
         send_dingtalk "$message"
         echo "$current_time" > "$last_alert_file"
+        log "Resource alert sent: $message"
     fi
 }
 
@@ -292,7 +308,7 @@ monitor_ip() {
             old_ip=$(cat "$ip_file")
         fi
         if [[ "$current_ip" != "$old_ip" ]]; then
-            local message="🌐 IP 变动\n旧 IP:\n$old_ip\n新 IP:\n$current_ip\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+            local message="🌐 IP 变动 [网络]\n\n📝 备注: ${REMARK:-未设置}\n\n🖥️ 主机名: $(hostname)\n\n旧 IP:\n$old_ip\n\n新 IP:\n$current_ip\n\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
             send_telegram "$message"
             send_dingtalk "$message"
             echo "$current_ip" > "$ip_file"
@@ -305,7 +321,8 @@ monitor_ip() {
 send_boot_notification() {
     local hostname=$(hostname)
     local ip_info=$(get_ip)
-    local message="✅ VPS 已上线\n备注: $REMARK\n主机名: $hostname\n公网IP:\n$ip_info\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+    local time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
+    local message="VPS:\n✅ VPS 已上線 [成功]\n\n📝 備註: ${REMARK:-未設置}\n\n🖥️ 主機名: $hostname\n\n🌐 公網IP:\n$ip_info\n\n🕒 時間: $time"
     send_telegram "$message"
     send_dingtalk "$message"
     log "Boot notification sent"
@@ -315,7 +332,9 @@ send_boot_notification() {
 send_ssh_notification() {
     local user="$1"
     local ip="$2"
-    local message="🔐 SSH 登录\n用户: $user\n来源 IP: $ip\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+    local hostname=$(hostname)
+    local time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
+    local message="VPS:\n🔐 SSH 登录 [登录]\n\n📝 備註: ${REMARK:-未設置}\n\n👤 用户: $user\n\n🖥️ 主机: $hostname\n\n🌐 来源 IP: $ip\n\n🕒 時間: $time"
     send_telegram "$message"
     send_dingtalk "$message"
     log "SSH login notification sent: $user from $ip"
@@ -479,13 +498,13 @@ test_notifications() {
                 echo -e "${GREEN}SSH 登录通知已发送${NC}"
                 ;;
             3)
-                local message="⚠️ 测试资源警报\n内存使用率: 85%\nCPU 使用率: 90%\n磁盘使用率: 95%\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                local message="VPS:\n⚠️ 测试资源警报 [警告]\n\n📊 内存使用率: 85%\n\n📈 CPU 使用率: 90%\n\n💾 磁盘使用率: 95%\n\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
                 send_telegram "$message"
                 send_dingtalk "$message"
                 echo -e "${GREEN}资源警报已发送${NC}"
                 ;;
             4)
-                local message="🌐 测试 IP 变动\n旧 IP:\nIPv4: 192.168.1.1\n新 IP:\n$(get_ip)\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                local message="VPS:\n🌐 测试 IP 变动 [网络]\n\n📝 备注: ${REMARK:-未设置}\n\n🖥️ 主机名: $(hostname)\n\n旧 IP:\nIPv4: 192.168.1.1\n\n新 IP:\n$(get_ip)\n\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
                 send_telegram "$message"
                 send_dingtalk "$message"
                 echo -e "${GREEN}IP 变动通知已发送${NC}"
@@ -525,7 +544,7 @@ check_status() {
 # Main menu
 main_menu() {
     while true; do
-        echo -e "\nVPS Notify 管理菜单 (v2.8)"
+        echo -e "\nVPS Notify 管理菜单 (v2.81)"
         echo "1. 安装/重新安装"
         echo "2. 配置设置"
         echo "3. 测试通知"
