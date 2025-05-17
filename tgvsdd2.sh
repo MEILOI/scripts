@@ -1,12 +1,13 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v2.8
+# VPS Notify Script (tgvsdd2.sh) v2.9
 # Purpose: Monitor VPS status (IP, SSH, resources) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 2.8 (2025-05-17)
+# Version: 2.9 (2025-05-17)
 # Changelog:
-# - v2.8: Added retry mechanism to DingTalk validation/sending, enhanced logging, removed invalid tags
-# - v2.7: Enhanced comments, clarified validate_dingtalk logic (no access_token encryption)
+# - v2.9: Enhanced colored menu with per-item colors, added TERM compatibility check
+# - v2.8: Added retry mechanism to DingTalk validation/sending, enhanced logging
+# - v2.7: Clarified validate_dingtalk logic (no access_token encryption)
 # - v2.2: Added DingTalk signed request support
 # - v2.1: Added script update functionality
 # - v2.0: Initial optimized version with menu and multi-channel notifications
@@ -20,7 +21,18 @@ LOG_MAX_SIZE=$((1024*1024)) # 1MB
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Check terminal color support
+if [[ "$TERM" != *"color"* ]]; then
+    echo -e "${YELLOW}警告：终端可能不支持颜色显示，建议设置 export TERM=xterm-256color${NC}"
+    COLOR_SUPPORT=0
+    log "Warning: TERM=$TERM does not support colors"
+else
+    COLOR_SUPPORT=1
+    log "Color support enabled (TERM=$TERM)"
+fi
 
 # Ensure log file exists
 mkdir -p /var/log
@@ -88,15 +100,15 @@ validate_telegram() {
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
         local response=$(curl -s -m 5 "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe")
         if echo "$response" | grep -q '"ok":true'; then
-            echo "Telegram Bot 验证成功"
+            echo -e "${GREEN}Telegram Bot 验证成功${NC}"
             return 0
         else
-            echo "Telegram Bot 验证失败：无效的 Token"
+            echo -e "${RED}Telegram Bot 验证失败：无效的 Token${NC}"
             log "ERROR: Telegram validation failed: $response"
             return 1
         fi
     else
-        echo "Telegram 配置不完整或未启用"
+        echo -e "${YELLOW}Telegram 配置不完整或未启用${NC}"
         return 1
     fi
 }
@@ -133,7 +145,7 @@ validate_dingtalk() {
         errmsg=$(echo "$response" | grep -o '"errmsg":"[^"]*"' | cut -d: -f2- | tr -d '"')
 
         if [[ "$errcode" == "0" ]]; then
-            echo "DingTalk Webhook 验证成功"
+            echo -e "${GREEN}DingTalk Webhook 验证成功${NC}"
             log "DingTalk validation succeeded on attempt $attempt for $masked_webhook"
             return 0
         else
@@ -325,7 +337,7 @@ send_ssh_notification() {
 install_dependencies() {
     local packages="curl grep gawk systemd coreutils openssl"
     if ! command -v apt >/dev/null 2>&1; then
-        echo "仅支持基于 Debian/Ubuntu 的系统"
+        echo -e "${RED}仅支持基于 Debian/Ubuntu 的系统${NC}"
         log "ERROR: Unsupported system, apt not found"
         exit 1
     fi
@@ -338,7 +350,7 @@ install_dependencies() {
 install() {
     install_dependencies
     load_config
-    echo "开始安装 VPS Notify..."
+    echo -e "${BLUE}开始安装 VPS Notify...${NC}"
     # Configure systemd service
     cat > /etc/systemd/system/vps_notify.service << EOL
 [Unit]
@@ -363,7 +375,7 @@ EOL
 
 # Uninstall script
 uninstall() {
-    echo "开始卸载 VPS Notify..."
+    echo -e "${BLUE}开始卸载 VPS Notify...${NC}"
     systemctl disable vps_notify.service
     rm -f /etc/systemd/system/vps_notify.service
     rm -f /etc/cron.d/vps_notify
@@ -398,17 +410,17 @@ update_script() {
 configure_settings() {
     load_config
     while true; do
-        echo -e "\n配置设置"
-        echo "1. 启用/禁用 Telegram 通知"
-        echo "2. 修改 Telegram Bot Token"
-        echo "3. 修改 Telegram Chat IDs"
-        echo "4. 启用/禁用 DingTalk 通知"
-        echo "5. 修改 DingTalk Webhook"
-        echo "6. 修改 DingTalk Secret"
-        echo "7. 启用/禁用 IP 变动通知"
-        echo "8. 配置资源监控"
-        echo "9. 修改备注"
-        echo "0. 返回主菜单"
+        echo -e "\n${YELLOW}=== 配置设置 ===${NC}"
+        echo -e "${GREEN}1.${NC} 启用/禁用 Telegram 通知"
+        echo -e "${GREEN}2.${NC} 修改 Telegram Bot Token"
+        echo -e "${GREEN}3.${NC} 修改 Telegram Chat IDs"
+        echo -e "${GREEN}4.${NC} 启用/禁用 DingTalk 通知"
+        echo -e "${GREEN}5.${NC} 修改 DingTalk Webhook"
+        echo -e "${GREEN}6.${NC} 修改 DingTalk Secret"
+        echo -e "${GREEN}7.${NC} 启用/禁用 IP 变动通知"
+        echo -e "${GREEN}8.${NC} 配置资源监控"
+        echo -e "${GREEN}9.${NC} 修改备注"
+        echo -e "${GREEN}0.${NC} 返回主菜单"
         read -p "请选择: " choice
         case $choice in
             1)
@@ -416,7 +428,7 @@ configure_settings() {
                 ;;
             2)
                 read -p "请输入 Telegram Bot Token: " TG_BOT_TOKEN
-                validate_telegram && echo -e "${GREEN}Token 有效${NC}" || echo -e "${RED}Token 无效${NC}"
+                validate_telegram
                 ;;
             3)
                 read -p "请输入 Telegram Chat IDs (逗号分隔): " TG_CHAT_IDS
@@ -462,12 +474,12 @@ configure_settings() {
 test_notifications() {
     load_config
     while true; do
-        echo -e "\n测试通知"
-        echo "1. 测试开机通知"
-        echo "2. 测试 SSH 登录通知"
-        echo "3. 测试资源警报"
-        echo "4. 测试 IP 变动通知"
-        echo "0. 返回主菜单"
+        echo -e "\n${YELLOW}=== 测试通知 ===${NC}"
+        echo -e "${GREEN}1.${NC} 测试开机通知"
+        echo -e "${GREEN}2.${NC} 测试 SSH 登录通知"
+        echo -e "${GREEN}3.${NC} 测试资源警报"
+        echo -e "${GREEN}4.${NC} 测试 IP 变动通知"
+        echo -e "${GREEN}0.${NC} 返回主菜单"
         read -p "请选择: " choice
         case $choice in
             1)
@@ -502,7 +514,7 @@ test_notifications() {
 
 # Check system status
 check_status() {
-    echo -e "\n系统状态"
+    echo -e "\n${YELLOW}=== 系统状态 ===${NC}"
     if systemctl is-active --quiet vps_notify.service; then
         echo -e "${GREEN}VPS Notify 服务: 运行中${NC}"
     else
@@ -518,21 +530,21 @@ check_status() {
     else
         echo -e "${RED}SSH 通知: 未启用${NC}"
     fi
-    echo -e "\n最近日志:"
+    echo -e "\n${BLUE}最近日志:${NC}"
     tail -n 5 "$LOG_FILE"
 }
 
 # Main menu
 main_menu() {
     while true; do
-        echo -e "\nVPS Notify 管理菜单 (v2.8)"
-        echo "1. 安装/重新安装"
-        echo "2. 配置设置"
-        echo "3. 测试通知"
-        echo "4. 检查系统状态"
-        echo "5. 卸载"
-        echo "6. 更新脚本"
-        echo "0. 退出"
+        echo -e "\n${YELLOW}=== VPS Notify 管理菜单 (v2.9) ===${NC}"
+        echo -e "${GREEN}1.${NC} 安装/重新安装"
+        echo -e "${GREEN}2.${NC} 配置设置"
+        echo -e "${GREEN}3.${NC} 测试通知"
+        echo -e "${GREEN}4.${NC} 检查系统状态"
+        echo -e "${GREEN}5.${NC} 卸载"
+        echo -e "${GREEN}6.${NC} 更新脚本"
+        echo -e "${GREEN}0.${NC} 退出"
         read -p "请选择: " choice
         case $choice in
             1)
