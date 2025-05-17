@@ -1,193 +1,31 @@
-#!/bin/bash
+'
+```
 
-# VPS Notify Script (tgvsdd2.sh)
-# Version: 2.7
-# License: MIT
-# Description: Monitors VPS status (IP, resources, SSH login, boot) and sends notifications via Telegram and DingTalk.
+### 问题分析
+- **错误原因**：错误提示表明脚本第 190 行附近包含了一个非法的 Bash 语法元素 `<xaiArtifact>`，这是我之前回复中用于包装代码的内部标记，不应出现在实际脚本文件中。显然，你下载的脚本（从 `meiloi/scripts` 仓库）可能意外包含了 `<xaiArtifact>` 标记，或者你直接复制了我回复中的内容（包含标记）到脚本文件，导致 Bash 解析失败。
+- **脚本来源**：
+  - 你通过 `curl` 从 GitHub 下载，理论上仓库中的 `tgvsdd2.sh` 不应包含 `<xaiArtifact>`，因为那是我的响应格式，不是代码本身。
+  - 可能的情况：
+    1. 你之前手动覆盖了 GitHub 仓库的 `tgvsdd2.sh`，但错误地包含了 `<xaiArtifact>` 标记。
+    2. 仓库中的 `tgvsdd2.sh` 被意外污染（例如提交了带标记的版本）。
+    3. 你本地保存的 `tgvsdd2.sh` 混淆了我的回复内容。
+- **钉钉问题背景**：你之前提到钉钉通知返回 `{"errcode":300005,"errmsg":"token is not exist"}`，这与当前语法错误无关，但修复脚本后我们需要继续排查。
 
-# Configuration file
-CONFIG_FILE="/etc/vps_notify.conf"
-LOG_FILE="/var/log/vps_notify.log"
-LOG_MAX_SIZE=1048576 # 1MB
+### 修复步骤
+我将提供正确的 `tgvsdd2.sh` v2.7 代码（不含 `<xaiArtifact>` 标记），确保 Bash 语法无误，并指导你重新覆盖 GitHub 仓库（`meiloi/scripts`）和本地文件。同时，我会保留 v2.7 的功能（加签支持、日志优化等），并附上验证和测试步骤，确保脚本运行正常。
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+#### 1. 验证当前脚本
+让我们先检查你下载的脚本是否包含错误标记：
+```bash
+head -n 192 tgvsdd2.sh | tail -n 5
+```
+- 如果输出包含 `<xaiArtifact>` 或类似标记，确认脚本已损坏。
+- 分享输出，我会确认问题来源。
 
-# Ensure log directory exists
-mkdir -p "$(dirname "$LOG_FILE")"
+#### 2. 提供正确代码
+以下是 `tgvsdd2.sh` v2.7 的完整代码，已移除所有非 Bash 内容，保持与之前的逻辑一致（`artifact_id="4eb6be03-04d4-4472-b8c7-4ff86863eae9"`, v2.7）。代码包含详细注释，支持 Telegram/DingTalk 通知、加签、IP 监控等功能。
 
-# Log function
-log() {
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] $1" >> "$LOG_FILE"
-    # Rotate log if size exceeds limit
-    if [[ -f "$LOG_FILE" && $(stat -c%s "$LOG_FILE") -ge $LOG_MAX_SIZE ]]; then
-        mv "$LOG_FILE" "${LOG_FILE}.old"
-        touch "$LOG_FILE"
-        log "Log rotated due to size limit"
-    fi
-}
-
-# Load configuration
-load_config() {
-    if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
-    else
-        log "ERROR: Config file $CONFIG_FILE not found"
-        echo -e "${RED}Error: Config file $CONFIG_FILE not found${NC}"
-        exit 1
-    fi
-}
-
-# Save configuration
-save_config() {
-    cat << EOF > "$CONFIG_FILE"
-ENABLE_TG_NOTIFY=${ENABLE_TG_NOTIFY:-0}
-TG_BOT_TOKEN="${TG_BOT_TOKEN}"
-TG_CHAT_IDS="${TG_CHAT_IDS}"
-ENABLE_DINGTALK_NOTIFY=${ENABLE_DINGTALK_NOTIFY:-0}
-DINGTALK_WEBHOOK="${DINGTALK_WEBHOOK}"
-DINGTALK_SECRET="${DINGTALK_SECRET}"
-ENABLE_MEM_MONITOR=${ENABLE_MEM_MONITOR:-1}
-MEM_THRESHOLD=${MEM_THRESHOLD:-80}
-ENABLE_CPU_MONITOR=${ENABLE_CPU_MONITOR:-1}
-CPU_THRESHOLD=${CPU_THRESHOLD:-80}
-ENABLE_DISK_MONITOR=${ENABLE_DISK_MONITOR:-1}
-DISK_THRESHOLD=${DISK_THRESHOLD:-80}
-ENABLE_IP_CHANGE_NOTIFY=${ENABLE_IP_CHANGE_NOTIFY:-1}
-REMARK="${REMARK}"
-EOF
-    chmod 600 "$CONFIG_FILE"
-    log "Configuration saved to $CONFIG_FILE"
-}
-
-# Validate Telegram configuration
-validate_telegram() {
-    if [[ "$ENABLE_TG_NOTIFY" != "1" ]]; then
-        return 0
-    fi
-    if [[ -z "$TG_BOT_TOKEN" || -z "$TG_CHAT_IDS" ]]; then
-        log "ERROR: Telegram Bot Token or Chat IDs missing"
-        echo -e "${RED}Error: Telegram Bot Token or Chat IDs missing${NC}"
-        return 1
-    fi
-    local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-        -d chat_id="${TG_CHAT_IDS%%,*}" \
-        -d text="VPS 测试消息")
-    local ok=$(echo "$response" | grep -o '"ok":true')
-    if [[ -n "$ok" ]]; then
-        echo "Telegram 验证成功"
-        return 0
-    else
-        local error=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
-        log "ERROR: Telegram validation failed: $error"
-        echo -e "${RED}Telegram 验证失败: $error${NC}"
-        return 1
-    fi
-}
-
-# Validate DingTalk configuration
-validate_dingtalk() {
-    local webhook="$1"
-    local secret="$2"
-    local max_attempts=3
-    local attempt=1
-    local response errcode errmsg
-
-    while [[ $attempt -le $max_attempts ]]; do
-        local timestamp=$(date +%s%3N)
-        local sign=""
-        local url="$webhook"
-
-        if [[ -n "$secret" ]]; then
-            local string_to_sign="${timestamp}\n${secret}"
-            sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}×tamp=${timestamp}&sign=${sign}"
-        fi
-
-        response=$(curl -s -m 5 -X POST "$url" \
-            -H "Content-Type: application/json" \
-            -d '{"msgtype": "text", "text": {"content": "VPS 测试消息"}}')
-
-        errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d: -f2)
-        errmsg=$(echo "$response" | grep -o '"errmsg":"[^"]*"' | cut -d: -f2- | tr -d '"')
-
-        if [[ "$errcode" == "0" ]]; then
-            echo "DingTalk Webhook 验证成功"
-            log "DingTalk validation succeeded on attempt $attempt"
-            return 0
-        else
-            log "ERROR: DingTalk validation failed on attempt $attempt: errcode=$errcode, errmsg=$errmsg"
-            if [[ $attempt -lt $max_attempts ]]; then
-                sleep 2
-                ((attempt++))
-            else
-                echo -e "${RED}DingTalk Webhook 验证失败 (错误码: $errcode)：$errmsg${NC}"
-                return 1
-            fi
-        fi
-    done
-}
-
-# Send Telegram notification
-send_telegram() {
-    if [[ "$ENABLE_TG_NOTIFY" != "1" ]]; then
-        return 0
-    fi
-    local message="$1"
-    local chat_id
-    IFS=',' read -ra chat_ids <<< "$TG_CHAT_IDS"
-    for chat_id in "${chat_ids[@]}"; do
-        local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            -d chat_id="$chat_id" \
-            -d text="$message" \
-            -d parse_mode="Markdown")
-        local ok=$(echo "$response" | grep -o '"ok":true')
-        if [[ -z "$ok" ]]; then
-            local error=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
-            log "ERROR: Failed to send Telegram message to $chat_id: $error"
-        else
-            log "Sent Telegram message to $chat_id"
-        fi
-    done
-}
-
-# Send DingTalk notification
-send_dingtalk() {
-    if [[ "$ENABLE_DINGTALK_NOTIFY" != "1" ]]; then
-        return 0
-    fi
-    local message="$1"
-    local timestamp=$(date +%s%3N)
-    local sign=""
-    local url="$DINGTALK_WEBHOOK"
-
-    if [[ -n "$DINGTALK_SECRET" ]]; then
-        local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
-       感谢你的信任！作为编程小白，你希望获取 `tgvsdd2.sh` 脚本 v2.7 的完整代码（`artifact_id="4eb6be03-04d4-4472-b8c7-4ff86863eae9"`），以手动覆盖 GitHub 仓库。我会提供完整的脚本代码，确保与 v2.7 的功能一致（包括 Telegram 和 DingTalk 通知、加签支持、IP 监控等），并附上简明的覆盖 GitHub 仓库的步骤，方便你操作。
-
-由于你提到钉钉通知持续返回 `{"errcode":300005,"errmsg":"token is not exist"}`，且在两台 VPS 上测试失败，我已确认脚本的 `validate_dingtalk` 函数不加密 `access_token`，问题可能出在 Webhook 失效或钉钉服务器限制。我会确保 v2.7 代码保持现有逻辑（v2.2），并在代码注释中添加清晰的说明，帮助你理解关键部分。同时，我会更新 `README.md`（`artifact_id="cbb759b4-cf79-42fe-9ed3-0701674f2582"`, v2.7）以匹配脚本，确保文档和代码一致。
-
-### v2.7 脚本说明
-- **版本**：v2.7（基于 v2.2，未修改核心逻辑，仅优化注释和 README）。
-- **功能**：
-  - Telegram 和 DingTalk 通知（支持加签）。
-  - 监控 IP 变动、SSH 登录、CPU/内存/磁盘使用率。
-  - 交互式菜单，自动化安装 systemd 服务和 cron 任务。
-  - 日志管理（`/var/log/vps_notify.log`）。
-  - 支持脚本更新。
-- **关键逻辑**：
-  - `validate_dingtalk`：验证 Webhook，不修改 `access_token`，支持加签（附加 `timestamp` 和 `sign`）。
-  - `send_dingtalk`：发送通知，处理加签和关键词。
-  - `get_ip`：获取 IPv4/IPv6，使用多个后备服务。
-
-### 完整代码
-以下是 `tgvsdd2.sh` v2.7 的完整代码，包含详细注释，方便你理解：
-
-<xaiArtifact artifact_id="4eb6be03-04d4-4472-b8c7-4ff86863eae9" artifact_version_id="9dfa5045-0a4a-4dcd-a04f-93ef474aecf0" title="tgvsdd2.sh" contentType="text/x-sh">
+<xaiArtifact artifact_id="4eb6be03-04d4-4472-b8c7-4ff86863eae9" artifact_version_id="b37844fe-3d17-45cb-9022-af91e8d6a9a2" title="tgvsdd2.sh" contentType="text/x-sh">
 #!/bin/bash
 
 # VPS Notify Script (tgvsdd2.sh) v2.7
