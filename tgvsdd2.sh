@@ -1,38 +1,11 @@
-'
-```
-
-### 问题分析
-- **错误原因**：错误提示表明脚本第 190 行附近包含了一个非法的 Bash 语法元素 `<xaiArtifact>`，这是我之前回复中用于包装代码的内部标记，不应出现在实际脚本文件中。显然，你下载的脚本（从 `meiloi/scripts` 仓库）可能意外包含了 `<xaiArtifact>` 标记，或者你直接复制了我回复中的内容（包含标记）到脚本文件，导致 Bash 解析失败。
-- **脚本来源**：
-  - 你通过 `curl` 从 GitHub 下载，理论上仓库中的 `tgvsdd2.sh` 不应包含 `<xaiArtifact>`，因为那是我的响应格式，不是代码本身。
-  - 可能的情况：
-    1. 你之前手动覆盖了 GitHub 仓库的 `tgvsdd2.sh`，但错误地包含了 `<xaiArtifact>` 标记。
-    2. 仓库中的 `tgvsdd2.sh` 被意外污染（例如提交了带标记的版本）。
-    3. 你本地保存的 `tgvsdd2.sh` 混淆了我的回复内容。
-- **钉钉问题背景**：你之前提到钉钉通知返回 `{"errcode":300005,"errmsg":"token is not exist"}`，这与当前语法错误无关，但修复脚本后我们需要继续排查。
-
-### 修复步骤
-我将提供正确的 `tgvsdd2.sh` v2.7 代码（不含 `<xaiArtifact>` 标记），确保 Bash 语法无误，并指导你重新覆盖 GitHub 仓库（`meiloi/scripts`）和本地文件。同时，我会保留 v2.7 的功能（加签支持、日志优化等），并附上验证和测试步骤，确保脚本运行正常。
-
-#### 1. 验证当前脚本
-让我们先检查你下载的脚本是否包含错误标记：
-```bash
-head -n 192 tgvsdd2.sh | tail -n 5
-```
-- 如果输出包含 `<xaiArtifact>` 或类似标记，确认脚本已损坏。
-- 分享输出，我会确认问题来源。
-
-#### 2. 提供正确代码
-以下是 `tgvsdd2.sh` v2.7 的完整代码，已移除所有非 Bash 内容，保持与之前的逻辑一致（`artifact_id="4eb6be03-04d4-4472-b8c7-4ff86863eae9"`, v2.7）。代码包含详细注释，支持 Telegram/DingTalk 通知、加签、IP 监控等功能。
-
-<xaiArtifact artifact_id="4eb6be03-04d4-4472-b8c7-4ff86863eae9" artifact_version_id="b37844fe-3d17-45cb-9022-af91e8d6a9a2" title="tgvsdd2.sh" contentType="text/x-sh">
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v2.7
+# VPS Notify Script (tgvsdd2.sh) v2.8
 # Purpose: Monitor VPS status (IP, SSH, resources) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 2.7 (2025-05-17)
+# Version: 2.8 (2025-05-17)
 # Changelog:
+# - v2.8: Added retry mechanism to DingTalk validation/sending, enhanced logging, removed invalid tags
 # - v2.7: Enhanced comments, clarified validate_dingtalk logic (no access_token encryption)
 # - v2.2: Added DingTalk signed request support
 # - v2.1: Added script update functionality
@@ -132,33 +105,48 @@ validate_telegram() {
 validate_dingtalk() {
     local webhook="$1"
     local secret="$2"
-    local timestamp=$(date +%s%3N)
-    local sign=""
-    local url="$webhook"
+    local max_attempts=3
+    local attempt=1
+    local response errcode errmsg masked_webhook
 
-    # Add timestamp and sign for signed requests
-    if [[ -n "$secret" ]]; then
-        local string_to_sign="${timestamp}\n${secret}"
-        sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-        url="${webhook}×tamp=${timestamp}&sign=${sign}"
-    fi
+    # Mask access_token for logging
+    masked_webhook=$(echo "$webhook" | sed 's/\(access_token=\).*/\1[hidden]/')
 
-    # Send test message (includes keyword "VPS")
-    local response=$(curl -s -m 5 -X POST "$url" \
-        -H "Content-Type: application/json" \
-        -d '{"msgtype": "text", "text": {"content": "VPS 测试消息"}}')
+    while [[ $attempt -le $max_attempts ]]; do
+        local timestamp=$(date +%s%3N)
+        local sign=""
+        local url="$webhook"
 
-    local errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d: -f2)
-    local errmsg=$(echo "$response" | grep -o '"errmsg":"[^"]*"' | cut -d: -f2- | tr -d '"')
+        # Add timestamp and sign for signed requests
+        if [[ -n "$secret" ]]; then
+            local string_to_sign="${timestamp}\n${secret}"
+            sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
+            url="${webhook}×tamp=${timestamp}&sign=${sign}"
+        fi
 
-    if [[ "$errcode" == "0" ]]; then
-        echo "DingTalk Webhook 验证成功"
-        return 0
-    else
-        echo "DingTalk Webhook 验证失败 (错误码: $errcode)：$errmsg"
-        log "ERROR: DingTalk validation failed: $response"
-        return 1
-    fi
+        # Send test message (includes keyword "VPS")
+        response=$(curl -s -m 5 -X POST "$url" \
+            -H "Content-Type: application/json" \
+            -d '{"msgtype": "text", "text": {"content": "VPS 测试消息"}}')
+
+        errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d: -f2)
+        errmsg=$(echo "$response" | grep -o '"errmsg":"[^"]*"' | cut -d: -f2- | tr -d '"')
+
+        if [[ "$errcode" == "0" ]]; then
+            echo "DingTalk Webhook 验证成功"
+            log "DingTalk validation succeeded on attempt $attempt for $masked_webhook"
+            return 0
+        else
+            log "ERROR: DingTalk validation failed on attempt $attempt for $masked_webhook: errcode=$errcode, errmsg=$errmsg"
+            if [[ $attempt -lt $max_attempts ]]; then
+                sleep 2
+                ((attempt++))
+            else
+                echo -e "${RED}DingTalk Webhook 验证失败 (错误码: $errcode)：$errmsg${NC}"
+                return 1
+            fi
+        fi
+    done
 }
 
 # Send Telegram notification
@@ -180,26 +168,42 @@ send_telegram() {
 send_dingtalk() {
     local message="$1"
     if [[ "$ENABLE_DINGTALK_NOTIFY" -eq 1 && -n "$DINGTALK_WEBHOOK" ]]; then
-        local timestamp=$(date +%s%3N)
-        local sign=""
-        local url="$DINGTALK_WEBHOOK"
+        local max_attempts=3
+        local attempt=1
+        local response errcode masked_webhook
 
-        if [[ -n "$DINGTALK_SECRET" ]]; then
-            local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
-            sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-            url="${DINGTALK_WEBHOOK}×tamp=${timestamp}&sign=${sign}"
-        fi
+        # Mask access_token for logging
+        masked_webhook=$(echo "$DINGTALK_WEBHOOK" | sed 's/\(access_token=\).*/\1[hidden]/')
 
-        local response=$(curl -s -m 5 -X POST "$url" \
-            -H "Content-Type: application/json" \
-            -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"VPS $message\"}}")
+        while [[ $attempt -le $max_attempts ]]; do
+            local timestamp=$(date +%s%3N)
+            local sign=""
+            local url="$DINGTALK_WEBHOOK"
 
-        local errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d: -f2)
-        if [[ "$errcode" != "0" ]]; then
-            log "ERROR: Failed to send DingTalk message: $response"
-        else
-            log "DingTalk notification sent: $message"
-        fi
+            if [[ -n "$DINGTALK_SECRET" ]]; then
+                local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
+                sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
+                url="${DINGTALK_WEBHOOK}×tamp=${timestamp}&sign=${sign}"
+            fi
+
+            response=$(curl -s -m 5 -X POST "$url" \
+                -H "Content-Type: application/json" \
+                -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"VPS $message\"}}")
+
+            errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d: -f2)
+            if [[ "$errcode" == "0" ]]; then
+                log "DingTalk notification sent on attempt $attempt for $masked_webhook: $message"
+                return 0
+            else
+                log "ERROR: Failed to send DingTalk message on attempt $attempt for $masked_webhook: $response"
+                if [[ $attempt -lt $max_attempts ]]; then
+                    sleep 2
+                    ((attempt++))
+                else
+                    return 1
+                fi
+            fi
+        done
     fi
 }
 
@@ -521,7 +525,7 @@ check_status() {
 # Main menu
 main_menu() {
     while true; do
-        echo -e "\nVPS Notify 管理菜单 (v2.7)"
+        echo -e "\nVPS Notify 管理菜单 (v2.8)"
         echo "1. 安装/重新安装"
         echo "2. 配置设置"
         echo "3. 测试通知"
