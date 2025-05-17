@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.8
+# VPS Notify Script (tgvsdd2.sh) v3.0.9
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.8 (2025-05-17)
+# Version: 3.0.9 (2025-05-17)
 # Changelog:
+# - v3.0.9: Restored v2.8 Telegram push (use -d instead of --data-urlencode, parse_mode=Markdown), fixed \n line break issue, removed DEBUG_TG/TG_EMOJI user prompts (fixed to 1), set default config options to 1 (Enter for yes), added Markdown special character escaping
 # - v3.0.8: Restored v2.2 Telegram settings (use parse_mode=Markdown for \n line breaks), removed TG_PARSE_MODE, retained TG_EMOJI and DEBUG_TG
 # - v3.0.7: Fixed syntax error (line 203, binary operator), removed parse_mode=HTML and <br>, restored emoji (✅, 🔐, ⚠️, 🌐), added TG_EMOJI and TG_PARSE_MODE
 # - v3.0.6: Fixed Telegram notification not showing (sanitize HTML, remove emoji, add retry with plain text), enhanced error checking
@@ -27,8 +28,8 @@ CONFIG_FILE="/etc/vps_notify.conf"
 LOG_FILE="/var/log/vps_notify.log"
 LOG_MAX_SIZE=$((1024*1024)) # 1MB
 LOG_RETENTION_DAYS=7
-DEBUG_TG=0 # Debug mode for Telegram (1=enabled, 0=disabled)
-TG_EMOJI=1 # Enable emoji in Telegram messages (1=enabled, 0=disabled)
+DEBUG_TG=1 # Debug mode for Telegram (fixed to enabled)
+TG_EMOJI=1 # Enable emoji in Telegram messages (fixed to enabled)
 
 # Logging function
 log() {
@@ -94,10 +95,10 @@ load_config() {
         source "$CONFIG_FILE"
     else
         # Default values
-        ENABLE_TG_NOTIFY=0
+        ENABLE_TG_NOTIFY=1
         TG_BOT_TOKEN=""
         TG_CHAT_IDS=""
-        ENABLE_DINGTALK_NOTIFY=0
+        ENABLE_DINGTALK_NOTIFY=1
         DINGTALK_WEBHOOK=""
         DINGTALK_SECRET=""
         ENABLE_IP_CHANGE_NOTIFY=1
@@ -110,15 +111,15 @@ load_config() {
         ENABLE_NETWORK_MONITOR=1
         ALERT_INTERVAL=6
         REMARK=""
-        DEBUG_TG=0
+        DEBUG_TG=1
         TG_EMOJI=1
         log "Configuration file not found, using defaults"
     fi
     # Ensure variables are defined
-    : "${ENABLE_TG_NOTIFY:=0}"
+    : "${ENABLE_TG_NOTIFY:=1}"
     : "${TG_BOT_TOKEN:=}"
     : "${TG_CHAT_IDS:=}"
-    : "${DEBUG_TG:=0}"
+    : "${DEBUG_TG:=1}"
     : "${TG_EMOJI:=1}"
 }
 
@@ -221,20 +222,20 @@ validate_input() {
     local value="$2"
     case $type in
         yes_no)
-            if [[ "$value" != "1" && "$value" != "0" ]]; then
-                echo -e "${RED}错误：请输入 1（是）或 0（否）${NC}"
+            if [[ "$value" != "1" && "$value" != "0" && -n "$value" ]]; then
+                echo -e "${RED}错误：请输入 1（是）、0（否）或回车（默认是）${NC}"
                 return 1
             fi
             ;;
         number)
-            if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-                echo -e "${RED}错误：请输入有效数字${NC}"
+            if [[ ! "$value" =~ ^[0-9]+$ && -n "$value" ]]; then
+                echo -e "${RED}错误：请输入有效数字或回车（默认值）${NC}"
                 return 1
             fi
             ;;
         chat_ids)
             for id in ${value//,/ }; do
-                if ! [[ "$id" =~ ^-?[0-9]+$ ]]; then
+                if [[ ! "$id" =~ ^-?[0-9]+$ ]]; then
                     echo -e "${RED}错误：Chat IDs 必须为数字（群组以 - 开头）${NC}"
                     return 1
                 fi
@@ -242,6 +243,13 @@ validate_input() {
             ;;
     esac
     return 0
+}
+
+# Escape Markdown special characters
+escape_markdown() {
+    local text="$1"
+    # Escape Markdown special characters: _, *, [, ], (, ), ~, `, #, +, -, =, |, {, }, ., !
+    echo "$text" | sed 's/[_\*\[\]\(\)\~\`\#\+\-\=\|\{\}\.\!]/\\&/g'
 }
 
 # Send Telegram notification
@@ -253,6 +261,8 @@ send_telegram() {
         if [[ "$TG_EMOJI" -eq 1 ]]; then
             final_message=$(echo "$message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
         fi
+        # Escape Markdown special characters
+        final_message=$(escape_markdown "$final_message")
         if [[ "$DEBUG_TG" -eq 1 ]]; then
             log "DEBUG: Original message: $message"
             log "DEBUG: Final message: $final_message"
@@ -260,9 +270,9 @@ send_telegram() {
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local url="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
             local response=$(curl -s -m 5 -X POST "$url" \
-                --data-urlencode "chat_id=${chat_id}" \
-                --data-urlencode "text=${final_message}" \
-                --data-urlencode "parse_mode=Markdown")
+                -d "chat_id=${chat_id}" \
+                -d "text=${final_message}" \
+                -d "parse_mode=Markdown")
             local is_ok=$(echo "$response" | grep -o '"ok":true')
             local message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
             local error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
@@ -463,7 +473,8 @@ guided_config() {
     echo -e "${BLUE}开始配置 VPS Notify...${NC}"
     # Telegram
     while true; do
-        read -p "启用 Telegram 通知？(1=是, 0=否): " ENABLE_TG_NOTIFY
+        read -p "启用 Telegram 通知？(1=是, 0=否, 默认 1): " ENABLE_TG_NOTIFY
+        ENABLE_TG_NOTIFY=${ENABLE_TG_NOTIFY:-1}
         validate_input yes_no "$ENABLE_TG_NOTIFY" && break
     done
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 ]]; then
@@ -498,9 +509,9 @@ guided_config() {
                     local valid_ids=""
                     for chat_id in ${TG_CHAT_IDS//,/ }; do
                         local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                            --data-urlencode "chat_id=${chat_id}" \
-                            --data-urlencode "text=${test_message}" \
-                            --data-urlencode "parse_mode=Markdown")
+                            -d "chat_id=${chat_id}" \
+                            -d "text=${test_message}" \
+                            -d "parse_mode=Markdown")
                         if echo "$response" | grep -q '"ok":true'; then
                             valid_ids+="$chat_id,"
                         else
@@ -516,30 +527,19 @@ guided_config() {
                     fi
                 fi
             done
-            while true; do
-                read -p "启用 Telegram 调试模式？(1=是, 0=否): " DEBUG_TG
-                validate_input yes_no "$DEBUG_TG" && break
-            done
-            while true; do
-                read -p "启用 Telegram emoji？(1=是, 0=否): " TG_EMOJI
-                validate_input yes_no "$TG_EMOJI" && break
-            done
         else
             TG_BOT_TOKEN=""
             TG_CHAT_IDS=""
-            DEBUG_TG=0
-            TG_EMOJI=1
         fi
     else
         TG_BOT_TOKEN=""
         TG_CHAT_IDS=""
-        DEBUG_TG=0
-        TG_EMOJI=1
     fi
 
     # DingTalk
     while true; do
-        read -p "启用 DingTalk 通知？(1=是, 0=否): " ENABLE_DINGTALK_NOTIFY
+        read -p "启用 DingTalk 通知？(1=是, 0=否, 默认 1): " ENABLE_DINGTALK_NOTIFY
+        ENABLE_DINGTALK_NOTIFY=${ENABLE_DINGTALK_NOTIFY:-1}
         validate_input yes_no "$ENABLE_DINGTALK_NOTIFY" && break
     done
     if [[ "$ENABLE_DINGTALK_NOTIFY" -eq 1 ]]; then
@@ -563,45 +563,54 @@ guided_config() {
 
     # Monitoring
     while true; do
-        read -p "启用 IP 变动通知？(1=是, 0=否): " ENABLE_IP_CHANGE_NOTIFY
+        read -p "启用 IP 变动通知？(1=是, 0=否, 默认 1): " ENABLE_IP_CHANGE_NOTIFY
+        ENABLE_IP_CHANGE_NOTIFY=${ENABLE_IP_CHANGE_NOTIFY:-1}
         validate_input yes_no "$ENABLE_IP_CHANGE_NOTIFY" && break
     done
     while true; do
-        read -p "启用内存监控？(1=是, 0=否): " ENABLE_MEM_MONITOR
+        read -p "启用内存监控？(1=是, 0=否, 默认 1): " ENABLE_MEM_MONITOR
+        ENABLE_MEM_MONITOR=${ENABLE_MEM_MONITOR:-1}
         validate_input yes_no "$ENABLE_MEM_MONITOR" && break
     done
     if [[ "$ENABLE_MEM_MONITOR" -eq 1 ]]; then
         while true; do
-            read -p "内存使用率阈值 (%): " MEM_THRESHOLD
+            read -p "内存使用率阈值 (%，默认 80): " MEM_THRESHOLD
+            MEM_THRESHOLD=${MEM_THRESHOLD:-80}
             validate_input number "$MEM_THRESHOLD" && [[ $MEM_THRESHOLD -le 100 ]] && break
         done
     fi
     while true; do
-        read -p "启用 CPU 监控？(1=是, 0=否): " ENABLE_CPU_MONITOR
+        read -p "启用 CPU 监控？(1=是, 0=否, 默认 1): " ENABLE_CPU_MONITOR
+        ENABLE_CPU_MONITOR=${ENABLE_CPU_MONITOR:-1}
         validate_input yes_no "$ENABLE_CPU_MONITOR" && break
     done
     if [[ "$ENABLE_CPU_MONITOR" -eq 1 ]]; then
         while true; do
-            read -p "CPU 使用率阈值 (%): " CPU_THRESHOLD
+            read -p "CPU 使用率阈值 (%，默认 80): " CPU_THRESHOLD
+            CPU_THRESHOLD=${CPU_THRESHOLD:-80}
             validate_input number "$CPU_THRESHOLD" && [[ $CPU_THRESHOLD -le 100 ]] && break
         done
     fi
     while true; do
-        read -p "启用磁盘监控？(1=是, 0=否): " ENABLE_DISK_MONITOR
+        read -p "启用磁盘监控？(1=是, 0=否, 默认 1): " ENABLE_DISK_MONITOR
+        ENABLE_DISK_MONITOR=${ENABLE_DISK_MONITOR:-1}
         validate_input yes_no "$ENABLE_DISK_MONITOR" && break
     done
     if [[ "$ENABLE_DISK_MONITOR" -eq 1 ]]; then
         while true; do
-            read -p "磁盘使用率阈值 (%): " DISK_THRESHOLD
+            read -p "磁盘使用率阈值 (%，默认 80): " DISK_THRESHOLD
+            DISK_THRESHOLD=${DISK_THRESHOLD:-80}
             validate_input number "$DISK_THRESHOLD" && [[ $DISK_THRESHOLD -le 100 ]] && break
         done
     fi
     while true; do
-        read -p "启用网络连接监控？(1=是, 0=否): " ENABLE_NETWORK_MONITOR
+        read -p "启用网络连接监控？(1=是, 0=否, 默认 1): " ENABLE_NETWORK_MONITOR
+        ENABLE_NETWORK_MONITOR=${ENABLE_NETWORK_MONITOR:-1}
         validate_input yes_no "$ENABLE_NETWORK_MONITOR" && break
     done
     while true; do
-        read -p "资源警报间隔 (小时): " ALERT_INTERVAL
+        read -p "资源警报间隔 (小时，默认 6): " ALERT_INTERVAL
+        ALERT_INTERVAL=${ALERT_INTERVAL:-6}
         validate_input number "$ALERT_INTERVAL" && break
     done
     read -p "请输入备注（如香港1号机）: " REMARK
@@ -666,7 +675,6 @@ update_script() {
         else
             log "ERROR: Downloaded script is empty"
             echo -e "${RED}更新失败：下载的脚本为空${NC}"
-       Shell
         fi
     else
         log "ERROR: Failed to download script from $remote_url"
@@ -778,17 +786,17 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}║       Version: 3.0.8              ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.9              ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
         echo -e "Telegram Bot Token: $tg_token_display"
-        echo -e "Telegram 通知: ${ENABLE_TG_NOTIFY:-0} (1=Y, 0=N)"
+        echo -e "Telegram 通知: ${ENABLE_TG_NOTIFY:-1} (1=Y, 0=N)"
         echo -e "Telegram Chat IDs: ${TG_CHAT_IDS:-未设置}"
-        echo -e "Telegram 调试模式: ${DEBUG_TG:-0} (1=Y, 0=N)"
+        echo -e "Telegram 调试模式: ${DEBUG_TG:-1} (1=Y, 0=N)"
         echo -e "Telegram Emoji: ${TG_EMOJI:-1} (1=Y, 0=N)"
         echo -e "DingTalk Webhook: $dt_webhook_display"
-        echo -e "DingTalk 通知: ${ENABLE_DINGTALK_NOTIFY:-0} (1=Y, 0=N)"
+        echo -e "DingTalk 通知: ${ENABLE_DINGTALK_NOTIFY:-1} (1=Y, 0=N)"
         echo -e "DingTalk Secret: $dt_secret_display"
         echo -e "备注: ${REMARK:-未设置}"
         echo -e "内存监控: ${ENABLE_MEM_MONITOR:-1} (阈值: ${MEM_THRESHOLD:-80}%)"
