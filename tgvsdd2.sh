@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v2.83
+# VPS Notify Script (tgvsdd2.sh) v2.84
 # Purpose: Monitor VPS status (IP, SSH, resources) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 2.83 (2025-05-17)
+# Version: 2.84 (2025-05-18)
 # Changelog:
-# - v2.83: Fixed syntax error in main_menu, switched to MarkdownV2 for Telegram push, optimized escaping
-# - v2.82: Fixed Telegram validation by relaxing conditions, added retry mechanism, enhanced logging
-# - v2.81: Updated Telegram push to use JSON format with Markdown, added Emoji support
-# - v2.8: Added retry mechanism to DingTalk validation/sending, enhanced logging, removed invalid tags
+# - v2.84: Fixed failed notifications by enhancing MarkdownV2 escaping, unified message format
+# - v2.83: Fixed syntax error in main_menu, switched to MarkdownV2 for Telegram push
+# - v2.82: Fixed Telegram validation, added retry mechanism, enhanced logging
+# - v2.81: Updated Telegram push to use JSON format with Markdown
 
 # Configuration file
 CONFIG_FILE="/etc/vps_notify.conf"
@@ -40,7 +40,7 @@ log() {
 load_config() {
     if [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-        log "Configuration loaded from $CONFIG_FILE: ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY, TG_CHAT_IDS=$TG_CHAT_IDS"
+        log "Configuration loaded from $CONFIG_FILE: ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY, TG_BOT_TOKEN=[hidden], TG_CHAT_IDS=$TG_CHAT_IDS"
     else
         ENABLE_TG_NOTIFY=0
         TG_BOT_TOKEN=""
@@ -125,7 +125,6 @@ validate_dingtalk() {
     local max_attempts=3
     local attempt=1
     local response errcode errmsg masked_webhook
-
     masked_webhook=$(echo "$webhook" | sed 's/\(access_token=\).*/\1[hidden]/')
     while [[ $attempt -le $max_attempts ]]; do
         local timestamp=$(date +%s%3N)
@@ -162,9 +161,14 @@ validate_dingtalk() {
 send_telegram() {
     local message="$1"
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
+        # Clean message: remove non-printable characters
+        message=$(echo "$message" | tr -dc '[:print:]\n')
         local final_message="$message"
+        # Replace tags with Emoji
         final_message=$(echo "$final_message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
-        final_message=$(echo "$final_message" | sed 's/[-!.*+#\[\]()>{}|=]/\\&/g')
+        # Escape MarkdownV2 special characters
+        final_message=$(echo "$final_message" | sed 's/[-!.*+#\[\]()>{}|=:%@]/\\&/g')
+        log "Telegram message before sending: $final_message"
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                 -H "Content-Type: application/json" \
@@ -176,7 +180,7 @@ send_telegram() {
             fi
         done
     else
-        log "Telegram notification skipped: ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY, TG_BOT_TOKEN=$TG_BOT_TOKEN, TG_CHAT_IDS=$TG_CHAT_IDS"
+        log "Telegram notification skipped: ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY, TG_BOT_TOKEN=[hidden], TG_CHAT_IDS=$TG_CHAT_IDS"
     fi
 }
 
@@ -195,7 +199,7 @@ send_dingtalk() {
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+                url="${DINGTALK_WEBHOOK}&timestamp=${timestamp}&sign=${sign}"
             fi
             response=$(curl -s -m 5 -X POST "$url" \
                 -H "Content-Type: application/json" \
@@ -272,7 +276,7 @@ monitor_resources() {
         fi
     fi
     if [[ -n "$message" ]]; then
-        message="⚠️ 资源警报 [警告]\\n\\n${message}🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+        message="VPS:\\n⚠️ 资源警报 [警告]\\n\\n${message}🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
         send_telegram "$message"
         send_dingtalk "$message"
         echo "$current_time" > "$last_alert_file"
@@ -290,7 +294,7 @@ monitor_ip() {
             old_ip=$(cat "$ip_file")
         fi
         if [[ "$current_ip" != "$old_ip" ]]; then
-            local message="🌐 IP 变动 [网络]\\n\\n📝 备注: ${REMARK:-未设置}\\n\\n🖥️ 主机名: $(hostname)\\n\\n旧 IP:\\n${old_ip}\\n\\n新 IP:\\n${current_ip}\\n\\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+            local message="VPS:\\n🌐 IP 变动 [网络]\\n\\n📝 备注: ${REMARK:-未设置}\\n\\n🖥️ 主机名: $(hostname)\\n\\n旧 IP:\\n${old_ip}\\n\\n新 IP:\\n${current_ip}\\n\\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
             send_telegram "$message"
             send_dingtalk "$message"
             echo "$current_ip" > "$ip_file"
@@ -529,7 +533,7 @@ check_status() {
 # Main menu
 main_menu() {
     while true; do
-        echo -e "\nVPS Notify 管理菜单 v2.83"
+        echo -e "\nVPS Notify 管理菜单 v2.84"
         echo "1. 安装/重新安装"
         echo "2. 配置设置"
         echo "3. 测试通知"
