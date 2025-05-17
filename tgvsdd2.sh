@@ -1,11 +1,12 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v2.9
+# VPS Notify Script (tgvsdd2.sh) v2.9.1
 # Purpose: Monitor VPS status (IP, SSH, resources) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 2.9 (2025-05-17)
+# Version: 2.9.1 (2025-05-17)
 # Changelog:
-# - v2.9: Enhanced colored menu with per-item colors, added TERM compatibility check
+# - v2.9.1: Restored v2.2 interactive UI with framed menu and config overview
+# - v2.9: Enhanced colored menu, added TERM compatibility check
 # - v2.8: Added retry mechanism to DingTalk validation/sending, enhanced logging
 # - v2.7: Clarified validate_dingtalk logic (no access_token encryption)
 # - v2.2: Added DingTalk signed request support
@@ -537,7 +538,47 @@ check_status() {
 # Main menu
 main_menu() {
     while true; do
-        echo -e "\n${YELLOW}=== VPS Notify 管理菜单 (v2.9) ===${NC}"
+        load_config
+        # Check installation status
+        local install_status="未安装"
+        if [[ -f /etc/systemd/system/vps_notify.service && -f /etc/cron.d/vps_notify ]]; then
+            install_status="已安装"
+        fi
+
+        # Mask sensitive info
+        local tg_token_display="未设置"
+        if [[ -n "$TG_BOT_TOKEN" ]]; then
+            tg_token_display="${TG_BOT_TOKEN:0:10}****"
+        fi
+        local dt_webhook_display="未设置"
+        if [[ -n "$DINGTALK_WEBHOOK" ]]; then
+            dt_webhook_display=$(echo "$DINGTALK_WEBHOOK" | sed 's/\(access_token=\).*/\1[hidden]/')
+        fi
+        local dt_secret_display="未设置"
+        if [[ -n "$DINGTALK_SECRET" ]]; then
+            dt_secret_display="${DINGTALK_SECRET:0:6}****"
+        fi
+
+        # Display menu
+        echo -e "${GREEN}════════════════════════════════════════${NC}"
+        echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
+        echo -e "${GREEN}════════════════════════════════════════${NC}"
+        echo -e "版本: 2.9.1\n"
+        echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
+        echo -e "当前配置:"
+        echo -e "Telegram Bot Token: $tg_token_display"
+        echo -e "Telegram 通知: ${ENABLE_TG_NOTIFY:-0} (1=Y, 0=N)"
+        echo -e "Telegram Chat IDs: ${TG_CHAT_IDS:-未设置}"
+        echo -e "DingTalk Webhook: $dt_webhook_display"
+        echo -e "DingTalk 通知: ${ENABLE_DINGTALK_NOTIFY:-0} (1=Y, 0=N)"
+        echo -e "DingTalk Secret: $dt_secret_display"
+        echo -e "备注: ${REMARK:-未设置}"
+        echo -e "SSH登录通知: ${ENABLE_SSH_NOTIFY:-1} (1=Y, 0=N)"
+        echo -e "内存监控: ${ENABLE_MEM_MONITOR:-1} (阈值: ${MEM_THRESHOLD:-80}%)"
+        echo -e "CPU监控: ${ENABLE_CPU_MONITOR:-1} (阈值: ${CPU_THRESHOLD:-80}%)"
+        echo -e "磁盘监控: ${ENABLE_DISK_MONITOR:-1} (阈值: ${DISK_THRESHOLD:-80}%)"
+        echo -e "IP变动通知: ${ENABLE_IP_CHANGE_NOTIFY:-1} (1=Y, 0=N)"
+        echo -e "\n${YELLOW}请选择操作:${NC}"
         echo -e "${GREEN}1.${NC} 安装/重新安装"
         echo -e "${GREEN}2.${NC} 配置设置"
         echo -e "${GREEN}3.${NC} 测试通知"
