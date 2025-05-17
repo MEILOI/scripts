@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.3
+# VPS Notify Script (tgvsdd2.sh) v3.0.4
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.3 (2025-05-17)
+# Version: 3.0.4 (2025-05-17)
 # Changelog:
+# - v3.0.4: Fixed Telegram newline (use parse_mode=MarkdownV2, escape special chars), added API response logging
 # - v3.0.3: Fixed Telegram notification newline (added parse_mode=Markdown), optimized remark prompt
 # - v3.0.2: Fixed log undefined error, fixed syntax error in get_ip and monitor_resources, improved compatibility
 # - v3.0.1: Fixed Telegram config bug (validate_telegram required TG_CHAT_IDS), optimized guided_config
@@ -227,20 +228,30 @@ validate_input() {
     return 0
 }
 
+# Escape special characters for Telegram MarkdownV2
+escape_markdown_v2() {
+    local text="$1"
+    # Escape special characters: . ! - + = | { } ( ) # > ` _ * [ ]
+    echo "$text" | sed 's/[\.\!\-\+\=\|\{\}\(\)\#>[`_*[]/\\&/g'
+}
+
 # Send Telegram notification
 send_telegram() {
     local message="$1"
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
+        # Escape message for MarkdownV2
+        local escaped_message=$(escape_markdown_v2 "$message")
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                 --data-urlencode "chat_id=${chat_id}" \
-                --data-urlencode "text=${message}" \
-                --data-urlencode "parse_mode=Markdown")
-            if ! echo "$response" | grep -q '"ok":true'; then
+                --data-urlencode "text=${escaped_message}" \
+                --data-urlencode "parse_mode=MarkdownV2")
+            if echo "$response" | grep -q '"ok":true'; then
+                log "Telegram notification sent to $chat_id: $message"
+            else
                 log "ERROR: Failed to send Telegram message to $chat_id: $response"
             fi
         done
-        log "Telegram notification sent: $message"
     fi
 }
 
@@ -469,7 +480,7 @@ guided_config() {
                         local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                             --data-urlencode "chat_id=${chat_id}" \
                             --data-urlencode "text=${test_message}" \
-                            --data-urlencode "parse_mode=Markdown")
+                            --data-urlencode "parse_mode=MarkdownV2")
                         if echo "$response" | grep -q '"ok":true'; then
                             valid_ids+="$chat_id,"
                         else
@@ -732,7 +743,7 @@ main_menu() {
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
-        echo -e "版本: 3.0.3\n"
+        echo -e "版本: 3.0.4\n"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
         echo -e "Telegram Bot Token: $tg_token_display"
