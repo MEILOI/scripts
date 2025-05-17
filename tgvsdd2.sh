@@ -5,7 +5,7 @@
 # License: MIT
 # Version: 2.84 (2025-05-18)
 # Changelog:
-# - v2.84: Fixed failed notifications by enhancing MarkdownV2 escaping, unified message format
+# - v2.84: Fixed Telegram push failure due to unescaped '.' in MarkdownV2, unified resource alert format
 # - v2.83: Fixed syntax error in main_menu, switched to MarkdownV2 for Telegram push
 # - v2.82: Fixed Telegram validation, added retry mechanism, enhanced logging
 # - v2.81: Updated Telegram push to use JSON format with Markdown
@@ -133,7 +133,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+            url="${webhook}×tamp=${timestamp}&sign=${sign}"
         fi
         response=$(curl -s -m 5 -X POST "$url" \
             -H "Content-Type: application/json" \
@@ -167,7 +167,7 @@ send_telegram() {
         # Replace tags with Emoji
         final_message=$(echo "$final_message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
         # Escape MarkdownV2 special characters
-        final_message=$(echo "$final_message" | sed 's/[-!.*+#\[\]()>{}|=:%@]/\\&/g')
+        final_message=$(echo "$final_message" | sed 's/[-!.+*#\[\]()>{}|=:%@]/\\&/g')
         log "Telegram message before sending: $final_message"
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
@@ -198,8 +198,8 @@ send_dingtalk() {
             local url="$DINGTALK_WEBHOOK"
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
-                sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${DINGTALK_WEBHOOK}&timestamp=${timestamp}&sign=${sign}"
+                sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
+                url="${webhook}×tamp=${timestamp}&sign=${sign}"
             fi
             response=$(curl -s -m 5 -X POST "$url" \
                 -H "Content-Type: application/json" \
