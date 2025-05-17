@@ -1,16 +1,14 @@
 #!/bin/bash
 
 # VPS Notification Script (Advanced Optimized Version)
-# Version: 2.1
+# Version: 2.2
 # Changes:
-# - Added update_script function and menu option 6 for updating from GitHub
-# - Enhanced send_dingtalk with retry mechanism and better error handling
-# - Fixed syntax error in get_ip function (missing ) and incorrect URL 'three')
-# - Corrected typos: unload_script -> uninstall_script, menu text
-# - Verified all control structures for proper closure
-# - Includes Telegram/DingTalk notifications, disk monitoring, logging, status checks
+# - Added DingTalk webhook signature support in send_dingtalk for "加签" security
+# - Enhanced error handling for DingTalk validation
+# - Updated validate_dingtalk to log specific error codes
+# - Previous changes from v2.1 retained (update_script, menu option 6, etc.)
 
-SCRIPT_VERSION="2.1"
+SCRIPT_VERSION="2.2"
 CONFIG_FILE="/etc/vps_notify.conf"
 SCRIPT_PATH="/usr/local/bin/vps_notify.sh"
 SERVICE_PATH="/etc/systemd/system/vps_notify.service"
@@ -20,7 +18,7 @@ LOG_FILE="/var/log/vps_notify.log"
 GITHUB_URL="https://raw.githubusercontent.com/meiloi/scripts/main/tgvsdd2.sh"
 
 TG_API="https://api.telegram.org/bot"
-DINGTALK_API="https://oapi.dingtalk.com/robot/send?access_token="
+DINGTALK_API="https://oapi.dingtalk.com/robot/send"
 
 # 彩色输出
 RED='\033[0;31m'
@@ -106,18 +104,32 @@ validate_tg() {
 # 验证 DingTalk 配置
 validate_dingtalk() {
     local webhook="$1"
+    local secret="$2"
     if [ -z "$webhook" ]; then
         echo -e "${RED}错误: DingTalk Webhook 为空${NC}"
         log_message "ERROR: DingTalk webhook is empty"
         return 1
     fi
-    response=$(curl -s -m 5 -X POST "${DINGTALK_API}${webhook}" \
+
+    local url="${DINGTALK_API}?access_token=${webhook}"
+    if [ -n "$secret" ]; then
+        local timestamp=$(date +%s%3N)
+        local string_to_sign="${timestamp}\n${secret}"
+        local sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64)
+        sign=$(echo -n "$sign" | tr -d '\n')
+        url="${url}&timestamp=${timestamp}&sign=${sign}"
+    fi
+
+    response=$(curl -s -m 5 -X POST "$url" \
         -H "Content-Type: application/json" \
-        -d '{"msgtype": "text", "text": {"content": "Test"}}')
+        -d '{"msgtype": "text", "text": {"content": "VPS Test"}}')
+    
     if echo "$response" | grep -q '"errcode":0'; then
         return 0
     else
-        echo -e "${RED}DingTalk Webhook 验证失败，请检查:${NC} $response"
+        errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d':' -f2)
+        errmsg=$(echo "$response" | grep -o '"errmsg":"[^"]*"' | cut -d'"' -f4)
+        echo -e "${RED}DingTalk Webhook 验证失败 (错误码: ${errcode:-未知})：${errmsg:-未知}${NC}"
         log_message "ERROR: Invalid DingTalk webhook: $response"
         return 1
     fi
@@ -147,7 +159,7 @@ send_tg() {
     done
 }
 
-# 发送 DingTalk 通知（增强版）
+# 发送 DingTalk 通知（支持加签）
 send_dingtalk() {
     local message="$1"
     local max_retries=2
@@ -162,15 +174,31 @@ send_dingtalk() {
     
     # 清理消息：移除 Markdown 标记和特殊字符
     text=$(echo "$message" | sed 's/\*//g' | sed 's/^\s*//g' | sed 's/[\x00-\x1F\x7F]//g' | tr -d '\r\n' | sed 's/"/\\"/g')
+    text="VPS: $text" # 确保包含关键词
     if [ -z "$text" ]; then
         echo -e "${RED}错误: DingTalk消息内容为空${NC}"
         log_message "ERROR: DingTalk message content is empty"
         return 1
     fi
     
+    # 构建 Webhook URL
+    local url="${DINGTALK_API}?access_token=${DINGTALK_WEBHOOK}"
+    if [ -n "$DINGTALK_SECRET" ]; then
+        if ! command -v openssl &> /dev/null; then
+            echo -e "${RED}错误: 需要 openssl 来计算加签${NC}"
+            log_message "ERROR: openssl not found for DingTalk signature"
+            return 1
+        fi
+        local timestamp=$(date +%s%3N)
+        local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
+        local sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64)
+        sign=$(echo -n "$sign" | tr -d '\n')
+        url="${url}&timestamp=${timestamp}&sign=${sign}"
+    fi
+    
     # 重试机制
     while [ $retry_count -le $max_retries ]; do
-        response=$(curl -s -m 5 -X POST "${DINGTALK_API}${DINGTALK_WEBHOOK}" \
+        response=$(curl -s -m 5 -X POST "$url" \
             -H "Content-Type: application/json" \
             -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"$text\"}}")
         
@@ -179,7 +207,9 @@ send_dingtalk() {
             log_message "Sent DingTalk notification"
             return 0
         else
-            echo -e "${RED}发送DingTalk通知失败 (尝试 $((retry_count + 1))/${max_retries})${NC}"
+            errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d':' -f2)
+            errmsg=$(echo "$response" | grep -o '"errmsg":"[^"]*"' | cut -d'"' -f4)
+            echo -e "${RED}发送DingTalk通知失败 (尝试 $((retry_count + 1))/${max_retries}, 错误码: ${errcode:-未知})：${errmsg:-未知}${NC}"
             log_message "ERROR: Failed to send DingTalk: $response"
             retry_count=$((retry_count + 1))
             sleep 1
@@ -307,12 +337,12 @@ print_menu_header() {
 
 # 检查依赖
 check_dependencies() {
-    for cmd in curl grep awk systemctl df; do
+    for cmd in curl grep awk systemctl df openssl; do
         if ! command -v $cmd &> /dev/null; then
             echo -e "${RED}缺少依赖: $cmd${NC}"
             echo -e "${YELLOW}正在尝试安装必要依赖...${NC}"
-            apt update -y >/dev/null 2>&1 && apt install -y curl grep gawk systemd coreutils >/dev/null 2>&1 || \
-            yum install -y curl grep gawk systemd coreutils >/dev/null 2>&1
+            apt update -y >/dev/null 2>&1 && apt install -y curl grep gawk systemd coreutils openssl >/dev/null 2>&1 || \
+            yum install -y curl grep gawk systemd coreutils openssl >/dev/null 2>&1
             
             if ! command -v $cmd &> /dev/null; then
                 echo -e "${RED}安装依赖失败，请手动安装${NC}"
@@ -347,6 +377,7 @@ show_config() {
             echo -e "${BLUE}DingTalk Webhook:${NC} ${RED}未设置${NC}"
         fi
         echo -e "${BLUE}DingTalk 通知:${NC} ${ENABLE_DINGTALK_NOTIFY:-N}"
+        echo -e "${BLUE}DingTalk Secret:${NC} ${DINGTALK_SECRET:-未设置}"
         
         echo -e "${BLUE}备注:${NC} ${REMARK:-未设置}"
         echo -e "${BLUE}SSH登录通知:${NC} ${SSH_NOTIFY:-N}"
@@ -439,7 +470,7 @@ install_script() {
     chmod 644 "$LOG_FILE"
     log_message "Starting installation"
     
-    echo -e "${CYAN}[1/9]${NC} 选择通知方式:"
+    echo -e "${CYAN}[1/10]${NC} 选择通知方式:"
     echo -e "${CYAN}1.${NC} Telegram 通知"
     echo -e "${CYAN}2.${NC} DingTalk 通知"
     echo -e "${CYAN}3.${NC} 两者都启用"
@@ -466,9 +497,9 @@ install_script() {
     esac
     
     if [ "$ENABLE_TG_NOTIFY" = "Y" ]; then
-        echo -e "\n${CYAN}[2/9]${NC} 输入 Telegram Bot Token:"
+        echo -e "\n${CYAN}[2/10]${NC} 输入 Telegram Bot Token:"
         read -rp "Token (格式如123456789:ABCDEF...): " TG_BOT_TOKEN
-        echo -e "\n${CYAN}[3/9]${NC} 输入 Telegram Chat ID (支持多个，逗号分隔):"
+        echo -e "\n${CYAN}[3/10]${NC} 输入 Telegram Chat ID (支持多个，逗号分隔):"
         read -rp "Chat ID(s): " TG_CHAT_IDS
         if ! validate_tg "$TG_BOT_TOKEN" "$TG_CHAT_IDS"; then
             echo -e "${RED}Telegram 配置验证失败，请检查 Token 和 Chat ID${NC}"
@@ -481,32 +512,35 @@ install_script() {
     fi
     
     if [ "$ENABLE_DINGTALK_NOTIFY" = "Y" ]; then
-        echo -e "\n${CYAN}[4/9]${NC} 输入 DingTalk Webhook:"
+        echo -e "\n${CYAN}[4/10]${NC} 输入 DingTalk Webhook:"
         read -rp "Webhook: " DINGTALK_WEBHOOK
-        if ! validate_dingtalk "$DINGTALK_WEBHOOK"; then
-            echo -e "${RED}DingTalk 配置验证失败，请检查 Webhook${NC}"
+        echo -e "\n${CYAN}[5/10]${NC} 输入 DingTalk Secret (如果启用加签，否则留空):"
+        read -rp "Secret: " DINGTALK_SECRET
+        if ! validate_dingtalk "$DINGTALK_WEBHOOK" "$DINGTALK_SECRET"; then
+            echo -e "${RED}DingTalk 配置验证失败，请检查 Webhook 和 Secret${NC}"
             log_message "DingTalk configuration validation failed"
             read -rp "按Enter键继续或 Ctrl+C 退出..."
         fi
     else
         DINGTALK_WEBHOOK=""
+        DINGTALK_SECRET=""
     fi
     
-    echo -e "\n${CYAN}[5/9]${NC} 是否自定义主机备注? [Y/n]"
+    echo -e "\n${CYAN}[6/10]${NC} 是否自定义主机备注? [Y/n]"
     read -rp "默认启用 (Y): " CUSTOM_REMARK
     CUSTOM_REMARK=${CUSTOM_REMARK:-Y}
     if [ "$CUSTOM_REMARK" = "Y" ]; then
-        echo -e "${CYAN}[6/9]${NC} 输入主机备注 (如: 香港1号VPS):"
+        echo -e "${CYAN}[7/10]${NC} 输入主机备注 (如: 香港1号VPS):"
         read -rp "备注: " REMARK
     else
         REMARK=""
     fi
     
-    echo -e "\n${CYAN}[7/9]${NC} 启用 SSH 登录通知? [Y/n]"
+    echo -e "\n${CYAN}[8/10]${NC} 启用 SSH 登录通知? [Y/n]"
     read -rp "默认启用 (Y): " SSH_NOTIFY
     SSH_NOTIFY=${SSH_NOTIFY:-Y}
     
-    echo -e "\n${CYAN}[8/9]${NC} 设置监控选项"
+    echo -e "\n${CYAN}[9/10]${NC} 设置监控选项"
     read -rp "启用内存使用率监控? [Y/n] 默认启用 (Y): " ENABLE_MEM_MONITOR
     ENABLE_MEM_MONITOR=${ENABLE_MEM_MONITOR:-Y}
     if [ "$ENABLE_MEM_MONITOR" = "Y" ]; then
@@ -547,6 +581,7 @@ TG_BOT_TOKEN="$TG_BOT_TOKEN"
 TG_CHAT_IDS="$TG_CHAT_IDS"
 ENABLE_DINGTALK_NOTIFY="$ENABLE_DINGTALK_NOTIFY"
 DINGTALK_WEBHOOK="$DINGTALK_WEBHOOK"
+DINGTALK_SECRET="$DINGTALK_SECRET"
 REMARK="$REMARK"
 
 # 通知选项
@@ -721,15 +756,16 @@ modify_config() {
         echo -e "${CYAN}3.${NC} 修改 Telegram Chat ID"
         echo -e "${CYAN}4.${NC} ${ENABLE_DINGTALK_NOTIFY:-N} == "Y" ? "禁用" : "启用"} DingTalk 通知"
         echo -e "${CYAN}5.${NC} 修改 DingTalk Webhook"
-        echo -e "${CYAN}6.${NC} 修改主机备注"
-        echo -e "${CYAN}7.${NC} ${SSH_NOTIFY:-N} == "Y" ? "禁用" : "启用"} SSH登录通知"
-        echo -e "${CYAN}8.${NC} ${ENABLE_MEM_MONITOR:-N} == "Y" ? "禁用" : "启用"} 内存监控 (当前阈值: ${MEM_THRESHOLD:-90}%)"
-        echo -e "${CYAN}9.${NC} ${ENABLE_CPU_MONITOR:-N} == "Y" ? "禁用" : "启用"} CPU监控 (当前阈值: ${CPU_THRESHOLD:-4})"
-        echo -e "${CYAN}10.${NC} ${ENABLE_DISK_MONITOR:-N} == "Y" ? "禁用" : "启用"} 磁盘监控 (当前阈值: ${DISK_THRESHOLD:-90}%)"
-        echo -e "${CYAN}11.${NC} ${ENABLE_IP_CHANGE_NOTIFY:-N} == "Y" ? "禁用" : "启用"} IP变动通知"
+        echo -e "${CYAN}6.${NC} 修改 DingTalk Secret"
+        echo -e "${CYAN}7.${NC} 修改主机备注"
+        echo -e "${CYAN}8.${NC} ${SSH_NOTIFY:-N} == "Y" ? "禁用" : "启用"} SSH登录通知"
+        echo -e "${CYAN}9.${NC} ${ENABLE_MEM_MONITOR:-N} == "Y" ? "禁用" : "启用"} 内存监控 (当前阈值: ${MEM_THRESHOLD:-90}%)"
+        echo -e "${CYAN}10.${NC} ${ENABLE_CPU_MONITOR:-N} == "Y" ? "禁用" : "启用"} CPU监控 (当前阈值: ${CPU_THRESHOLD:-4})"
+        echo -e "${CYAN}11.${NC} ${ENABLE_DISK_MONITOR:-N} == "Y" ? "禁用" : "启用"} 磁盘监控 (当前阈值: ${DISK_THRESHOLD:-90}%)"
+        echo -e "${CYAN}12.${NC} ${ENABLE_IP_CHANGE_NOTIFY:-N} == "Y" ? "禁用" : "启用"} IP变动通知"
         echo -e "${CYAN}0.${NC} 返回主菜单"
         echo ""
-        read -rp "请选择 [0-11]: " choice
+        read -rp "请选择 [0-12]: " choice
         
         case $choice in
             1)
@@ -776,7 +812,7 @@ modify_config() {
                 echo -e "\n${YELLOW}请输入新的 DingTalk Webhook:${NC}"
                 read -rp "Webhook: " new_webhook
                 if [ -n "$new_webhook" ]; then
-                    if validate_dingtalk "$new_webhook"; then
+                    if validate_dingtalk "$new_webhook" "$DINGTALK_SECRET"; then
                         sed -i "s/DINGTALK_WEBHOOK=.*$/DINGTALK_WEBHOOK=\"$new_webhook\"/" "$CONFIG_FILE"
                         echo -e "${GREEN}DingTalk Webhook已更新${NC}"
                         log_message "DingTalk webhook updated"
@@ -787,6 +823,19 @@ modify_config() {
                 fi
                 ;;
             6)
+                echo -e "\n${YELLOW}请输入新的 DingTalk Secret (留空清除):${NC}"
+                read -rp "Secret: " new_secret
+                sed -i "s/DINGTALK_SECRET=.*$/DINGTALK_SECRET=\"$new_secret\"/" "$CONFIG_FILE" 2>/dev/null || \
+                echo "DINGTALK_SECRET=\"$new_secret\"" >> "$CONFIG_FILE"
+                if validate_dingtalk "$DINGTALK_WEBHOOK" "$new_secret"; then
+                    echo -e "${GREEN}DingTalk Secret已更新${NC}"
+                    log_message "DingTalk secret updated"
+                else
+                    echo -e "${RED}Secret 验证失败，请检查${NC}"
+                    log_message "ERROR: DingTalk secret validation failed"
+                fi
+                ;;
+            7)
                 echo -e "\n${YELLOW}请输入新的主机备注:${NC}"
                 read -rp "备注: " new_remark
                 sed -i "s/REMARK=.*$/REMARK=\"$new_remark\"/" "$CONFIG_FILE" 2>/dev/null || \
@@ -794,7 +843,7 @@ modify_config() {
                 echo -e "${GREEN}主机备注已更新${NC}"
                 log_message "Remark updated"
                 ;;
-            7)
+            8)
                 new_value=$([[ "${SSH_NOTIFY:-N}" == "Y" ]] && echo "N" || echo "Y")
                 sed -i "s/SSH_NOTIFY=.*$/SSH_NOTIFY=\"$new_value\"/" "$CONFIG_FILE"
                 if [ "$new_value" == "Y" ]; then
@@ -817,7 +866,7 @@ EOF
                     log_message "SSH notification disabled"
                 fi
                 ;;
-            8)
+            9)
                 if [[ "${ENABLE_MEM_MONITOR:-N}" == "Y" ]]; then
                     sed -i "s/ENABLE_MEM_MONITOR=.*$/ENABLE_MEM_MONITOR=\"N\"/" "$CONFIG_FILE"
                     echo -e "${GREEN}内存监控已禁用${NC}"
@@ -838,7 +887,7 @@ EOF
                     fi
                 fi
                 ;;
-            9)
+            10)
                 if [[ "${ENABLE_CPU_MONITOR:-N}" == "Y" ]]; then
                     sed -i "s/ENABLE_CPU_MONITOR=.*$/ENABLE_CPU_MONITOR=\"N\"/" "$CONFIG_FILE"
                     echo -e "${GREEN}CPU监控已禁用${NC}"
@@ -859,7 +908,7 @@ EOF
                     fi
                 fi
                 ;;
-            10)
+            11)
                 if [[ "${ENABLE_DISK_MONITOR:-N}" == "Y" ]]; then
                     sed -i "s/ENABLE_DISK_MONITOR=.*$/ENABLE_DISK_MONITOR=\"N\"/" "$CONFIG_FILE"
                     echo -e "${GREEN}磁盘监控已禁用${NC}"
@@ -880,7 +929,7 @@ EOF
                     fi
                 fi
                 ;;
-            11)
+            12)
                 if [[ "${ENABLE_IP_CHANGE_NOTIFY:-N}" == "Y" ]]; then
                     sed -i "s/ENABLE_IP_CHANGE_NOTIFY=.*$/ENABLE_IP_CHANGE_NOTIFY=\"N\"/" "$CONFIG_FILE"
                     echo -e "${GREEN}IP变动通知已禁用${NC}"
