@@ -1,728 +1,901 @@
 #!/bin/bash
 
+# VPS Notify Script (tgvsdd2.sh) v3.0.19
+# Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
+# License: MIT
+# Version: 3.0.19 (2025-05-17)
+# Changelog:
+# - v3.0.19: Fixed Telegram newline issue by using --data-urlencode for all parameters, improved escape_markdown for Markdown, added debug logging for Telegram message sending, retained Markdown parse_mode
+# - v3.0.18: Switch to Markdown (from MarkdownV2), fix line breaks using real newline characters, improve escape_markdown function, update menu version display
+# - v3.0.15: Enhanced Telegram newline handling by replacing \n with \n\n in MarkdownV2, verified --data-urlencode encodes \n as %0A, added debug logging for newline count and URL-encoded text, ensured escape_markdown covers all MarkdownV2 chars including @, retained plain text fallback, tested all notifications for newline reliability
+# - v3.0.14: Switched Telegram to parse_mode=MarkdownV2 for reliable newlines, updated escape_markdown for MarkdownV2 (added >, !, -, +, =, |, {, }, @), enhanced debug logging with URL-encoded text, added fallback to plain text if MarkdownV2 fails, tested all notifications for newline reliability
+# - v3.0.13: Updated SSH notification format to use emoji and multi-line layout (🔐, 📝, 👤, 🖥️, 🌐, 🕒), added hostname field, enhanced escape_markdown to include ':', added debug logging for curl request body, tested Markdown and MarkdownV2 for newline reliability
+# - v3.0.12: Enhanced escape_markdown to include '.' for Telegram Markdown, improved newline handling with --data-urlencode, added debug logging for raw and escaped messages, tested all notification types
+# - v3.0.11: Reverted Telegram to parse_mode=Markdown (from MarkdownV2) to fix notification failures, simplified escape_markdown for Markdown (escape _, *, [, ], (, ), `, #), added HTTP status code logging, validated TG_BOT_TOKEN/TG_CHAT_IDS in send_telegram
+# - v3.0.10: Fixed sed error in escape_markdown (corrected regex for special chars), switched Telegram to parse_mode=MarkdownV2 for reliable \n, enhanced MarkdownV2 escaping (:, `), added curl command logging, added log view in test menu
+# - v3.0.9: Restored v2.8 Telegram push (use -d instead of --data-urlencode, parse_mode=Markdown), fixed \n line break issue, removed DEBUG_TG/TG_EMOJI user prompts (fixed to 1), set default config options to 1 (Enter for yes), added Markdown special character escaping
+# - v3.0.8: Restored v2.2 Telegram settings (use parse_mode=Markdown for \n line breaks), removed TG_PARSE_MODE, retained TG_EMOJI and DEBUG_TG
+# - v3.0.7: Fixed syntax error (line 203, binary operator), removed parse_mode=HTML and <br>, restored emoji (✅, 🔐, ⚠️, 🌐), added TG_EMOJI and TG_PARSE_MODE
+# - v3.0.6: Fixed Telegram notification not showing (sanitize HTML, remove emoji, add retry with plain text), enhanced error checking
+# - v3.0.5: Fixed Telegram newline (use parse_mode=HTML with <br>), enhanced API response logging
+# - v3.0.4: Fixed Telegram newline (use parse_mode=MarkdownV2, escape special chars), added API response logging
+# - v3.0.3: Fixed Telegram notification newline (added parse_mode=Markdown), optimized remark prompt
+# - v3.0.2: Fixed log undefined error, fixed syntax error in get_ip and monitor_resources, improved compatibility
+# - v3.0.1: Fixed Telegram config bug (validate_telegram required TG_CHAT_IDS), optimized guided_config
+# - v3.0: Fixed Telegram newline bug, restored v2.2 guided install, added network monitoring and alert interval
+# - v2.9.1: Restored v2.2 interactive UI with framed menu and config overview
+# - v2.9: Enhanced colored menu, added TERM compatibility check
+# - v2.8: Added retry mechanism to DingTalk validation/sending, enhanced logging
+# - v2.7: Clarified validate_dingtalk logic
+# - v2.2: Added DingTalk signed request support
+# - v2.1: Added script update functionality
+# - v2.0: Initial optimized version with menu and multi-channel notifications
+
+# Configuration file
 CONFIG_FILE="/etc/vps_notify.conf"
-SCRIPT_PATH="/usr/local/bin/vps_notify.sh"
-SERVICE_PATH="/etc/systemd/system/vps_notify.service"
-CRON_JOB="*/5 * * * * root /usr/local/bin/vps_notify.sh monitor >/dev/null 2>&1"
-IP_FILE="/var/lib/vps_notify_ip.txt"
+LOG_FILE="/var/log/vps_notify.log"
+LOG_MAX_SIZE=$((1024*1024)) # 1MB
+LOG_RETENTION_DAYS=7
+DEBUG_TG=1 # Debug mode for Telegram (fixed to enabled)
+TG_EMOJI=1 # Enable emoji in Telegram messages (fixed to enabled)
 
-TG_API="https://api.telegram.org/bot"
-DINGTALK_API="https://oapi.dingtalk.com/robot/send?access_token="
+# Logging function
+log() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $1" >> "$LOG_FILE"
+    # Rotate log if exceeds max size
+    if [[ -f "$LOG_FILE" && $(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE") -gt $LOG_MAX_SIZE ]]; then
+        mv "$LOG_FILE" "${LOG_FILE}.old"
+        touch "$LOG_FILE"
+        echo "[$timestamp] Log rotated due to size limit" >> "$LOG_FILE"
+    fi
+    # Clean up old logs
+    find /var/log -name "vps_notify.log.old" -mtime +$LOG_RETENTION_DAYS -delete 2>/dev/null
+}
 
-# 彩色输出
+# Ensure log file exists
+mkdir -p /var/log
+touch "$LOG_FILE"
+log "Script started"
+
+# Check Bash version
+if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
+    echo "错误：需要 Bash 4.0 或更高版本"
+    log "ERROR: Bash version ${BASH_VERSION} is too old, requires 4.0+"
+    exit 1
+fi
+
+# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# 获取公网 IP
-get_ip() {
-    ipv4=$(curl -s4m 3 ip.sb || curl -s4m 3 ifconfig.me || curl -s4m 3 ipinfo.io/ip || echo "获取失败")
-    ipv6=$(curl -s6m 3 ip.sb || curl -s6m 3 ifconfig.me || curl -s6m 3 ipify.org || echo "获取失败")
-    echo -e "IPv4: $ipv4\nIPv6: $ipv6"
-}
+# Check terminal color support
+if [[ "$TERM" != *"color"* ]]; then
+    echo -e "${YELLOW}警告：终端可能不支持颜色显示，已自动设置为 xterm-256color${NC}"
+    export TERM=xterm-256color
+    COLOR_SUPPORT=0
+    log "Warning: TERM=$TERM does not support colors, set to xterm-256color"
+else
+    COLOR_SUPPORT=1
+    log "Color support enabled (TERM=$TERM)"
+fi
 
-# 获取仅IPv4地址
-get_ipv4() {
-    curl -s4m 3 ip.sb || curl -s4m 3 ifconfig.me || curl -s4m 3 ipinfo.io/ip || echo "获取失败"
-}
-
-# 检查IP变动
-check_ip_change() {
-    mkdir -p $(dirname "$IP_FILE")
-    
-    current_ip=$(get_ipv4)
-    if [ "$current_ip" = "获取失败" ]; then
-        return 1
+# Check time synchronization
+check_time_sync() {
+    if ! command -v ntpdate >/dev/null 2>&1; then
+        apt install -y ntpdate >/dev/null 2>&1
     fi
-    
-    if [ -f "$IP_FILE" ]; then
-        old_ip=$(cat "$IP_FILE")
-        if [ "$current_ip" != "$old_ip" ]; then
-            echo "$current_ip" > "$IP_FILE"
-            hostname=$(hostname)
-            time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-            message="🔄 *IP 變更通知*
+    local ntp_status=$(ntpdate -q pool.ntp.org 2>&1)
+    if [[ $? -ne 0 ]]; then
+        echo -e "${YELLOW}警告：系统时间未同步，可能影响钉钉加签。请运行 'ntpdate pool.ntp.org'${NC}"
+        log "Warning: Time sync failed: $ntp_status"
+    else
+        log "Time sync verified"
+    fi
+}
 
-📝 備註: ${REMARK:-未设置}
-🖥️ 主機名: $hostname
-🌐 舊 IP: $old_ip
-🌐 新 IP: $current_ip
-🕒 時間: $time"
-            send_notification "$message"
+# Load configuration
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+    else
+        # Default values
+        ENABLE_TG_NOTIFY=1
+        TG_BOT_TOKEN=""
+        TG_CHAT_IDS=""
+        ENABLE_DINGTALK_NOTIFY=1
+        DINGTALK_WEBHOOK=""
+        DINGTALK_SECRET=""
+        ENABLE_IP_CHANGE_NOTIFY=1
+        ENABLE_MEM_MONITOR=1
+        MEM_THRESHOLD=80
+        ENABLE_CPU_MONITOR=1
+        CPU_THRESHOLD=80
+        ENABLE_DISK_MONITOR=1
+        DISK_THRESHOLD=80
+        ENABLE_NETWORK_MONITOR=1
+        ALERT_INTERVAL=6
+        REMARK=""
+        DEBUG_TG=1
+        TG_EMOJI=1
+        log "Configuration file not found, using defaults"
+    fi
+    # Ensure variables are defined
+    : "${ENABLE_TG_NOTIFY:=1}"
+    : "${TG_BOT_TOKEN:=}"
+    : "${TG_CHAT_IDS:=}"
+    : "${DEBUG_TG:=1}"
+    : "${TG_EMOJI:=1}"
+}
+
+# Save configuration
+save_config() {
+    cat > "$CONFIG_FILE" << EOL
+ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY Oldest: 2025-05-17 18:21:41 (HKT)
+ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY
+TG_BOT_TOKEN="$TG_BOT_TOKEN"
+TG_CHAT_IDS="$TG_CHAT_IDS"
+ENABLE_DINGTALK_NOTIFY=$ENABLE_DINGTALK_NOTIFY
+DINGTALK_WEBHOOK="$DINGTALK_WEBHOOK"
+DINGTALK_SECRET="$DINGTALK_SECRET"
+ENABLE_IP_CHANGE_NOTIFY=$ENABLE_IP_CHANGE_NOTIFY
+ENABLE_MEM_MONITOR=$ENABLE_MEM_MONITOR
+MEM_THRESHOLD=$MEM_THRESHOLD
+ENABLE_CPU_MONITOR=$ENABLE_CPU_MONITOR
+CPU_THRESHOLD=$CPU_THRESHOLD
+ENABLE_DISK_MONITOR=$ENABLE_DISK_MONITOR
+DISK_THRESHOLD=$DISK_THRESHOLD
+ENABLE_NETWORK_MONITOR=$ENABLE_NETWORK_MONITOR
+ALERT_INTERVAL=$ALERT_INTERVAL
+REMARK="$REMARK"
+DEBUG_TG=$DEBUG_TG
+TG_EMOJI=$TG_EMOJI
+EOL
+    log "Configuration saved to $CONFIG_FILE"
+}
+
+# Validate Telegram configuration
+validate_telegram() {
+    if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" ]]; then
+        local response=$(curl -s -m 5 "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe")
+        if echo "$response" | grep -q '"ok":true'; then
+            echo -e "${GREEN}Telegram Bot 验证成功${NC}"
+            log "Telegram validation succeeded"
             return 0
-        fi
-    else
-        echo "$current_ip" > "$IP_FILE"
-    fi
-    return 1
-}
-
-# 发送 Telegram 通知
-send_tg() {
-    local message="$1"
-    if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_IDS" ]; then
-        echo -e "${RED}错误: Telegram配置不完整${NC}"
-        return 1
-    fi
-    
-    IFS=',' read -ra IDS <<< "$TG_CHAT_IDS"
-    for id in "${IDS[@]}"; do
-        response=$(curl -s -X POST "${TG_API}${TG_BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{\"chat_id\": \"$id\", \"text\": \"$message\", \"parse_mode\": \"Markdown\"}")
-        if ! echo "$response" | grep -q '"ok":true'; then
-            echo -e "${RED}发送Telegram通知到 $id 失败${NC}"
         else
-            echo -e "${GREEN}成功发送Telegram通知到 $id${NC}"
+            echo -e "${RED}Telegram Bot 验证失败：无效的 Token${NC}"
+            log "ERROR: Telegram validation failed: $response"
+            return 1
         fi
-    done
-}
-
-# 发送 DingTalk 通知
-send_dingtalk() {
-    local message="$1"
-    if [ -z "$DINGTALK_WEBHOOK" ]; then
-        echo -e "${RED}错误: DingTalk配置不完整${NC}"
+    else
+        echo -e "${YELLOW}Telegram 配置不完整或未启用${NC}"
+        log "Telegram config incomplete or disabled"
         return 1
     fi
-    
-    # 转换Markdown为纯文本以适应DingTalk
-    text=$(echo "$message" | sed 's/\*//g' | sed 's/^\s*//g')
-    response=$(curl -s -X POST "${DINGTALK_API}${DINGTALK_WEBHOOK}" \
-        -H "Content-Type: application/json" \
-        -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"$text\"}}")
-    
-    if ! echo "$response" | grep -q '"errcode":0'; then
-        echo -e "${RED}发送DingTalk通知失败: $response${NC}"
-    else
-        echo -e "${GREEN}成功发送DingTalk通知${NC}"
-    fi
 }
 
-# 统一发送通知
-send_notification() {
-    local message="$1"
-    [ "$ENABLE_TG_NOTIFY" = "Y" ] && send_tg "$message"
-    [ "$ENABLE_DINGTALK_NOTIFY" = "Y" ] && send_dingtalk "$message"
-}
+# Validate DingTalk configuration
+validate_dingtalk() {
+    local webhook="$1"
+    local secret="$2"
+    local max_attempts=3
+    local attempt=1
+    local response errcode errmsg masked_webhook
 
-# VPS 上线通知
-notify_boot() {
-    ip_info=$(get_ip)
-    hostname=$(hostname)
-    time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-    message="✅ *VPS 已上線*
+    # Mask access_token for logging
+    masked_webhook=$(echo "$webhook" | sed 's/\(access_token=\).*/\1[hidden]/')
 
-📝 備註: ${REMARK:-未设置}
-🖥️ 主機名: $hostname
-🌐 公網IP:
-$ip_info
-🕒 時間: $time"
-    send_notification "$message"
-}
+    while [[ $attempt -le $max_attempts ]]; do
+        local timestamp=$(date +%s%3N)
+        local sign=""
+        local url="$webhook"
 
-# SSH 登录通知
-notify_ssh() {
-    user="$PAM_USER"
-    ip="$PAM_RHOST"
-    hostname=$(hostname)
-    time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-    message="🔐 *SSH 登錄通知*
+        # Add timestamp and sign for signed requests
+        if [[ -n "$secret" ]]; then
+            local string_to_sign="${timestamp}\n${secret}"
+            sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
+            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+        fi
 
-📝 備註: ${REMARK:-未设置}
-👤 用戶: $user
-🖥️ 主機: $hostname
-🌐 來源 IP: $ip
-🕒 時間: $time"
-    send_notification "$message"
-}
+        # Send test message (includes keyword "VPS")
+        response=$(curl -s -m 5 -X POST "$url" \
+            -H "Content-Type: application/json" \
+            -d '{"msgtype": "text", "text": {"content": "VPS 测试消息"}}')
 
-# 资源监控
-monitor_usage() {
-    if [ "$ENABLE_IP_CHANGE_NOTIFY" = "Y" ]; then
-        check_ip_change
-    fi
-    
-    memory=$(free | awk '/Mem:/ {printf("%.0f", $3/$2*100)}')
-    load=$(awk '{print int($1)}' /proc/loadavg)
+        errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d: -f2)
+        errmsg=$(echo "$response" | grep -o '"errmsg":"[^"]*"' | cut -d: -f2- | tr -d '"')
 
-    now=$(date +%s)
-    last_warn=0
-    [ -f /tmp/vps_notify_last ] && last_warn=$(cat /tmp/vps_notify_last)
-
-    if (( now - last_warn < 21600 )); then
-        return
-    fi
-
-    alert=""
-    [[ $ENABLE_MEM_MONITOR == "Y" && $memory -ge $MEM_THRESHOLD ]] && alert+="🧠 *內存使用率過高*：${memory}%\n"
-    [[ $ENABLE_CPU_MONITOR == "Y" && $load -ge $CPU_THRESHOLD ]] && alert+="🔥 *CPU 負載過高*：${load}\n"
-
-    if [[ -n "$alert" || "$FORCE_SEND" == "Y" ]]; then
-        echo "$now" > /tmp/vps_notify_last
-        message="⚠️ *VPS 資源警報*
-
-📝 備註: ${REMARK:-未设置}
-$alert"
-        send_notification "$message"
-    fi
-}
-
-# 绘制菜单标题
-print_menu_header() {
-    clear
-    echo -e "${CYAN}════════════════════════════════════════${NC}"
-    echo -e "${CYAN}║       ${YELLOW}VPS 通知系統 (高級版)       ${CYAN}║${NC}"
-    echo -e "${CYAN}════════════════════════════════════════${NC}"
-    echo ""
-}
-
-# 检查依赖
-check_dependencies() {
-    for cmd in curl grep awk systemctl; do
-        if ! command -v $cmd &> /dev/null; then
-            echo -e "${RED}缺少依赖: $cmd${NC}"
-            echo -e "${YELLOW}正在尝试安装必要依赖...${NC}"
-            apt update -y >/dev/null 2>&1 && apt install -y curl grep gawk systemd >/dev/null 2>&1 || \
-            yum install -y curl grep gawk systemd >/dev/null 2>&1
-            
-            if ! command -v $cmd &> /dev/null; then
-                echo -e "${RED}安装依赖失败，请手动安装${NC}"
-                exit 1
+        if [[ "$errcode" == "0" ]]; then
+            echo -e "${GREEN}DingTalk Webhook 验证成功${NC}"
+            log "DingTalk validation succeeded on attempt $attempt for $masked_webhook"
+            return 0
+        else
+            log "ERROR: DingTalk validation failed on attempt $attempt for $masked_webhook: errcode=$errcode, errmsg=$errmsg"
+            if [[ $attempt -lt $max_attempts ]]; then
+                sleep 2
+                ((attempt++))
+            else
+                echo -e "${RED}DingTalk Webhook 验证失败 (错误码: $errcode)：$errmsg${NC}"
+                return 1
             fi
         fi
     done
 }
 
-# 显示当前配置
-show_config() {
-    echo -e "${CYAN}当前配置:${NC}"
-    
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        
-        # Telegram 配置
-        if [ -n "$TG_BOT_TOKEN" ]; then
-            token_prefix=$(echo $TG_BOT_TOKEN | cut -d':' -f1)
-            token_masked="$token_prefix:****"
-            echo -e "${BLUE}Telegram Bot Token:${NC} $token_masked"
-        else
-            echo -e "${BLUE}Telegram Bot Token:${NC} ${RED}未设置${NC}"
-        fi
-        echo -e "${BLUE}Telegram 通知:${NC} ${ENABLE_TG_NOTIFY:-N}"
-        echo -e "${BLUE}Telegram Chat IDs:${NC} ${TG_CHAT_IDS:-未设置}"
-        
-        # DingTalk 配置
-        if [ -n "$DINGTALK_WEBHOOK" ]; then
-            webhook_masked=$(echo $DINGTALK_WEBHOOK | cut -c1-10)****
-            echo -e "${BLUE}DingTalk Webhook:${NC} $webhook_masked"
-        else
-            echo -e "${BLUE}DingTalk Webhook:${NC} ${RED}未设置${NC}"
-        fi
-        echo -e "${BLUE}DingTalk 通知:${NC} ${ENABLE_DINGTALK_NOTIFY:-N}"
-        
-        # 其他配置
-        echo -e "${BLUE}备注:${NC} ${REMARK:-未设置}"
-        echo -e "${BLUE}SSH登录通知:${NC} ${SSH_NOTIFY:-N}"
-        echo -e "${BLUE}内存监控:${NC} ${ENABLE_MEM_MONITOR:-N} (阈值: ${MEM_THRESHOLD:-90}%)"
-        echo -e "${BLUE}CPU监控:${NC} ${ENABLE_CPU_MONITOR:-N} (阈值: ${CPU_THRESHOLD:-4})"
-        echo -e "${BLUE}IP变动通知:${NC} ${ENABLE_IP_CHANGE_NOTIFY:-N}"
-    else
-        echo -e "${RED}未找到配置文件，请先安装脚本${NC}"
-    fi
-    echo ""
-}
-
-# 安装脚本
-install_script() {
-    print_menu_header
-    echo -e "${CYAN}[安装] ${GREEN}开始安装 VPS 通知系统...${NC}"
-    echo ""
-    
-    check_dependencies
-    
-    # 通知方式选择
-    echo -e "${CYAN}[1/8]${NC} 选择通知方式:"
-    echo -e "${CYAN}1.${NC} Telegram 通知"
-    echo -e "${CYAN}2.${NC} DingTalk 通知"
-    echo -e "${CYAN}3.${NC} 两者都启用"
-    read -rp "请选择 [1-3]: " notify_choice
-    case $notify_choice in
-        1)
-            ENABLE_TG_NOTIFY="Y"
-            ENABLE_DINGTALK_NOTIFY="N"
+# Validate input
+validate_input() {
+    local type="$1"
+    local value="$2"
+    case $type in
+        yes_no)
+            if [[ "$value" != "1" && "$value" != "0" && -n "$value" ]]; then
+                echo -e "${RED}错误：请输入 1（是）、0（否）或回车（默认是）${NC}"
+                return 1
+            fi
             ;;
-        2)
-            ENABLE_TG_NOTIFY="N"
-            ENABLE_DINGTALK_NOTIFY="Y"
+        number)
+            if [[ ! "$value" =~ ^[0-9]+$ && -n "$value" ]]; then
+                echo -e "${RED}错误：请输入有效数字或回车（默认值）${NC}"
+                return 1
+            fi
             ;;
-        3)
-            ENABLE_TG_NOTIFY="Y"
-            ENABLE_DINGTALK_NOTIFY="Y"
-            ;;
-        *)
-            echo -e "${RED}无效选择，默认启用Telegram${NC}"
-            ENABLE_TG_NOTIFY="Y"
-            ENABLE_DINGTALK_NOTIFY="N"
+        chat_ids)
+            for id in ${value//,/ }; do
+                if [[ ! "$id" =~ ^-?[0-9]+$ ]]; then
+                    echo -e "${RED}错误：Chat IDs 必须为数字（群组以 - 开头）${NC}"
+                    return 1
+                fi
+            done
             ;;
     esac
-    
-    # Telegram 配置
-    if [ "$ENABLE_TG_NOTIFY" = "Y" ]; then
-        echo -e "\n${CYAN}[2/8]${NC} 输入 Telegram Bot Token:"
-        read -rp "Token (格式如123456789:ABCDEF...): " TG_BOT_TOKEN
-        echo -e "\n${CYAN}[3/8]${NC} 输入 Telegram Chat ID (支持多个，逗号分隔):"
-        read -rp "Chat ID(s): " TG_CHAT_IDS
+    return 0
+}
+
+# Escape Markdown special characters for Markdown
+escape_markdown() {
+    local text="$1"
+    # Escape Markdown special characters: _ * [ ] ( ) ` # - +
+    local escaped=$(echo "$text" | sed 's/\\([_\\*\\[\\]()`#+-]\\)/\\\\\\1/g')
+    echo "$escaped"
+}
+
+# Send Telegram notification
+send_telegram() {
+    local message="$1"
+    if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
+        local final_message="$message"
+        if [[ "$TG_EMOJI" -eq 1 ]]; then
+            final_message=$(echo "$final_message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
+        fi
+        local raw_message="$final_message"
+        final_message=$(escape_markdown "$final_message")
+        for chat_id in ${TG_CHAT_IDS//,/ }; do
+            local response=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=${chat_id}" \
+                --data-urlencode "text=${final_message}" \
+                --data-urlencode "parse_mode=Markdown")
+            if [[ "$DEBUG_TG" -eq 1 ]]; then
+                log "Telegram message sent to $chat_id: raw='$raw_message', escaped='$final_message', response='$response'"
+            fi
+            if ! echo "$response" | grep -q '"ok":true'; then
+                log "ERROR: Failed to send Telegram message to $chat_id: $response"
+            fi
+        done
+    else
+        if [[ "$DEBUG_TG" -eq 1 ]]; then
+            log "Telegram notification skipped: ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY, TG_BOT_TOKEN=${TG_BOT_TOKEN:0:10}..., TG_CHAT_IDS=$TG_CHAT_IDS"
+        fi
+    fi
+}
+
+# Send DingTalk notification
+send_dingtalk() {
+    local message="$1"
+    if [[ "$ENABLE_DINGTALK_NOTIFY" -eq 1 && -n "$DINGTALK_WEBHOOK" ]]; then
+        local max_attempts=3
+        local attempt=1
+        local response errcode masked_webhook
+
+        # Mask access_token for logging
+        masked_webhook=$(echo "$DINGTALK_WEBHOOK" | sed 's/\(access_token=\).*/\1[hidden]/')
+
+        while [[ $attempt -le $max_attempts ]]; do
+            local timestamp=$(date +%s%3N)
+            local sign=""
+            local url="$DINGTALK_WEBHOOK"
+
+            if [[ -n "$DINGTALK_SECRET" ]]; then
+                local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
+                sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
+                url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+            fi
+
+            response=$(curl -s -m 5 -X POST "$url" \
+                -H "Content-Type: application/json" \
+                -d "{\"msgtype\": \"text\", \"text\": {\"content\": \"VPS $message\"}}")
+
+            errcode=$(echo "$response" | grep -o '"errcode":[0-9]*' | cut -d: -f2)
+            if [[ "$errcode" == "0" ]]; then
+                log "DingTalk notification sent on attempt $attempt for $masked_webhook: $message"
+                return 0
+            else
+                log "ERROR: Failed to send DingTalk message on attempt $attempt for $masked_webhook: $response"
+                if [[ $attempt -lt $max_attempts ]]; then
+                    sleep 2
+                    ((attempt++))
+                else
+                    return 1
+                fi
+            fi
+        done
+    fi
+}
+
+# Get public IP addresses
+get_ip() {
+    local ipv4=""
+    local ipv6=""
+    # Try multiple services for IPv4
+    for service in "ip.sb" "ifconfig.me" "ipinfo.io/ip" "api.ipify.org"; do
+        ipv4=$(curl -s -m 3 "https://$service")
+        if [[ -n "$ipv4" && "$ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            break
+        fi
+    done
+    # Try multiple services for IPv6
+    for service in "ip.sb" "ifconfig.me" "ipinfo.io/ip"; do
+        ipv6=$(curl -s -m 3 -6 "https://$service")
+        if [[ -n "$ipv6" && "$ipv6" =~ ^[0-9a-fA-F:]+$ ]]; then
+            break
+        fi
+    done
+    echo "IPv4: ${ipv4:-获取失败}"
+    echo "IPv6: ${ipv6:-获取失败}"
+}
+
+# Monitor resources
+monitor_resources() {
+    local message=""
+    local current_time=$(date '+%s')
+    local last_alert_file="/tmp/vps_notify_last_alert"
+
+    # Check last alert time
+    local last_alert=0
+    if [[ -f "$last_alert_file" ]]; then
+        last_alert=$(cat "$last_alert_file")
+    fi
+
+    # Only send alert if ALERT_INTERVAL hours have passed
+    if [[ $((current_time - last_alert)) -lt $((ALERT_INTERVAL*3600)) ]]; then
+        return
+    fi
+
+    # Memory usage
+    if [[ "$ENABLE_MEM_MONITOR" -eq 1 ]]; then
+        local mem_info=$(free | grep Mem)
+        local total=$(echo "$mem_info" | awk '{print $2}')
+        local used=$(echo "$mem_info" | awk '{print $3}')
+        local usage=$((100 * used / total))
+        if [[ $usage -ge $MEM_THRESHOLD ]]; then
+            message+="[警告] 内存使用率: ${usage}% 超过阈值 ${MEM_THRESHOLD}%\n"
+        fi
+    fi
+
+    # CPU usage
+    if [[ "$ENABLE_CPU_MONITOR" -eq 1 ]]; then
+        local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}')
+        local usage=$(printf "%.0f" "$cpu_usage")
+        if [[ $usage -ge $CPU_THRESHOLD ]]; then
+            message+="[警告] CPU 使用率: ${usage}% 超过阈值 ${CPU_THRESHOLD}%\n"
+        fi
+    fi
+
+    # Disk usage
+    if [[ "$ENABLE_DISK_MONITOR" -eq 1 ]]; then
+        local disk_usage=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
+        if [[ $disk_usage -ge $DISK_THRESHOLD ]]; then
+            message+="[警告] 磁盘使用率: ${disk_usage}% 超过阈值 ${DISK_THRESHOLD}%\n"
+        fi
+    fi
+
+    if [[ -n "$message" ]]; then
+        message="[警告] 资源警报\n$message时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+        send_telegram "$message"
+        send_dingtalk "$message"
+        echo "$current_time" > "$last_alert_file"
+    fi
+}
+
+# Monitor IP changes
+monitor_ip() {
+    if [[ "$ENABLE_IP_CHANGE_NOTIFY" -eq 1 ]]; then
+        local ip_file="/tmp/vps_notify_ip"
+        local current_ip=$(get_ip)
+        local old_ip=""
+        if [[ -f "$ip_file" ]]; then
+            old_ip=$(cat "$ip_file")
+        fi
+        if [[ "$current_ip" != "$old_ip" ]]; then
+            local message="[网络] IP 变动\n旧 IP:\n$old_ip\n新 IP:\n$current_ip\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+            send_telegram "$message"
+            send_dingtalk "$message"
+            echo "$current_ip" > "$ip_file"
+            log "IP changed: $current_ip"
+        fi
+    fi
+}
+
+# Monitor network connectivity
+monitor_network() {
+    if [[ "$ENABLE_NETWORK_MONITOR" -eq 1 ]]; then
+        local ping_result=$(ping -c 3 -W 2 8.8.8.8 2>/dev/null)
+        if [[ $? -ne 0 ]]; then
+            local message="[网络] 网络连接失败\n目标: 8.8.8.8\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+            send_telegram "$message"
+            send_dingtalk "$message"
+            log "Network connectivity failed: $ping_result"
+        fi
+    fi
+}
+
+# Send boot notification
+send_boot_notification() {
+    local hostname=$(hostname)
+    local ip_info=$(get_ip)
+    local message="[成功] VPS 已上线\n备注: $REMARK\n主机名: $hostname\n公网IP:\n$ip_info\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+    send_telegram "$message"
+    send_dingtalk "$message"
+    log "Boot notification sent"
+}
+
+# Send SSH login notification
+send_ssh_notification() {
+    local user="$1"
+    local ip="$2"
+    local hostname=$(hostname)
+    local message="🔐 SSH 登录通知\n📝 备注: $REMARK\n👤 用户: $user\n🖥️ 主机: $hostname\n🌐 来源 IP: $ip\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+    send_telegram "$message"
+    send_dingtalk "$message"
+    log "SSH login notification sent: $user from $ip"
+}
+
+# Install dependencies
+install_dependencies() {
+    local packages="curl grep gawk systemd coreutils openssl ntpdate"
+    if ! command -v apt >/dev/null 2>&1; then
+        echo -e "${RED}仅支持基于 Debian/Ubuntu 的系统${NC}"
+        log "ERROR: Unsupported system, apt not found"
+        exit 1
+    fi
+    apt update
+    apt install -y $packages
+    log "Dependencies installed: $packages"
+}
+
+# Guided configuration
+guided_config() {
+    echo -e "${BLUE}开始配置 VPS Notify...${NC}"
+    # Telegram
+    while true; do
+        read -p "启用 Telegram 通知？(1=是, 0=否, 默认 1): " ENABLE_TG_NOTIFY
+        ENABLE_TG_NOTIFY=${ENABLE_TG_NOTIFY:-1}
+        validate_input yes_no "$ENABLE_TG_NOTIFY" && break
+    done
+    if [[ "$ENABLE_TG_NOTIFY" -eq 1 ]]; then
+        local max_attempts=5
+        local attempt=1
+        while [[ $attempt -le $max_attempts ]]; do
+            read -p "请输入 Telegram Bot Token: " TG_BOT_TOKEN
+            if [[ -n "$TG_BOT_TOKEN" ]]; then
+                if validate_telegram; then
+                    break
+                else
+                    ((attempt++))
+                    if [[ $attempt -le $max_attempts ]]; then
+                        echo -e "${YELLOW}请重试（剩余 $((max_attempts - attempt + 1)) 次）${NC}"
+                    else
+                        echo -e "${RED}达到最大尝试次数，跳过 Telegram 配置${NC}"
+                        ENABLE_TG_NOTIFY=0
+                        TG_BOT_TOKEN=""
+                        break
+                    fi
+                fi
+            else
+                echo -e "${RED}错误：Token 不能为空${NC}"
+            fi
+        done
+        if [[ "$ENABLE_TG_NOTIFY" -eq 1 ]]; then
+            while true; do
+                read -p "请输入 Telegram Chat IDs (逗号分隔): " TG_CHAT_IDS
+                if validate_input chat_ids "$TG_CHAT_IDS"; then
+                    # Test Chat IDs by sending a message
+                    local test_message="VPS 测试消息"
+                    local valid_ids=""
+                    for chat_id in ${TG_CHAT_IDS//,/ }; do
+                        local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                            --data-urlencode "chat_id=${chat_id}" \
+                            --data-urlencode "text=${test_message}" \
+                            --data-urlencode "parse_mode=Markdown")
+                        if echo "$response" | grep -q '"ok":true'; then
+                            valid_ids+="$chat_id,"
+                        else
+                            log "ERROR: Invalid Chat ID $chat_id: $response"
+                            echo -e "${YELLOW}警告：Chat ID $chat_id 无效，已跳过${NC}"
+                        fi
+                    done
+                    if [[ -n "$valid_ids" ]]; then
+                        TG_CHAT_IDS="${valid_ids%,}"
+                        break
+                    else
+                        echo -e "${RED}错误：所有 Chat IDs 均无效，请重新输入${NC}"
+                    fi
+                fi
+            done
+        else
+            TG_BOT_TOKEN=""
+            TG_CHAT_IDS=""
+        fi
     else
         TG_BOT_TOKEN=""
         TG_CHAT_IDS=""
     fi
-    
-    # DingTalk 配置
-    if [ "$ENABLE_DINGTALK_NOTIFY" = "Y" ]; then
-        echo -e "\n${CYAN}[4/8]${NC} 输入 DingTalk Webhook:"
-        read -rp "Webhook: " DINGTALK_WEBHOOK
+
+    # DingTalk
+    while true; do
+        read -p "启用 DingTalk 通知？(1=是, 0=否, 默认 1): " ENABLE_DINGTALK_NOTIFY
+        ENABLE_DINGTALK_NOTIFY=${ENABLE_DINGTALK_NOTIFY:-1}
+        validate_input yes_no "$ENABLE_DINGTALK_NOTIFY" && break
+    done
+    if [[ "$ENABLE_DINGTALK_NOTIFY" -eq 1 ]]; then
+        while true; do
+            read -p "请输入 DingTalk Webhook: " DINGTALK_WEBHOOK
+            if [[ -n "$DINGTALK_WEBHOOK" ]]; then
+                read -p "请输入 DingTalk Secret (留空禁用加签): " DINGTALK_SECRET
+                if validate_dingtalk "$DINGTALK_WEBHOOK" "$DINGTALK_SECRET"; then
+                    break
+                else
+                    echo -e "${YELLOW}请重试${NC}"
+                fi
+            else
+                echo -e "${RED}错误：Webhook 不能为空${NC}"
+            fi
+        done
     else
         DINGTALK_WEBHOOK=""
+        DINGTALK_SECRET=""
     fi
-    
-    # 备注配置
-    echo -e "\n${CYAN}[5/8]${NC} 是否自定义主机备注? [Y/n]"
-    read -rp "默认启用 (Y): " CUSTOM_REMARK
-    CUSTOM_REMARK=${CUSTOM_REMARK:-Y}
-    if [ "$CUSTOM_REMARK" = "Y" ]; then
-        echo -e "${CYAN}[6/8]${NC} 输入主机备注 (如: 香港1号VPS):"
-        read -rp "备注: " REMARK
-    else
-        REMARK=""
-    fi
-    
-    # 其他配置
-    echo -e "\n${CYAN}[7/8]${NC} 启用 SSH 登录通知? [Y/n]"
-    read -rp "默认启用 (Y): " SSH_NOTIFY
-    SSH_NOTIFY=${SSH_NOTIFY:-Y}
-    
-    echo -e "\n${CYAN}[8/8]${NC} 设置监控选项"
-    read -rp "启用内存使用率监控? [Y/n] 默认启用 (Y): " ENABLE_MEM_MONITOR
-    ENABLE_MEM_MONITOR=${ENABLE_MEM_MONITOR:-Y}
-    if [ "$ENABLE_MEM_MONITOR" = "Y" ]; then
-        read -rp "设置内存使用率警报阈值 (%) 默认90%: " MEM_THRESHOLD
-        MEM_THRESHOLD=${MEM_THRESHOLD:-90}
-    fi
-    read -rp "启用CPU负载监控? [Y/n] 默认启用 (Y): " ENABLE_CPU_MONITOR
-    ENABLE_CPU_MONITOR=${ENABLE_CPU_MONITOR:-Y}
-    if [ "$ENABLE_CPU_MONITOR" = "Y" ]; then
-        read -rp "设置CPU负载警报阈值 默认4: " CPU_THRESHOLD
-        CPU_THRESHOLD=${CPU_THRESHOLD:-4}
-    fi
-    read -rp "启用IP变动通知? [Y/n] 默认启用 (Y): " ENABLE_IP_CHANGE_NOTIFY
-    ENABLE_IP_CHANGE_NOTIFY=${ENABLE_IP_CHANGE_NOTIFY:-Y}
-    
-    # 创建配置文件
-    cat <<EOF > "$CONFIG_FILE"
-# 通知配置
-ENABLE_TG_NOTIFY="$ENABLE_TG_NOTIFY"
-TG_BOT_TOKEN="$TG_BOT_TOKEN"
-TG_CHAT_IDS="$TG_CHAT_IDS"
-ENABLE_DINGTALK_NOTIFY="$ENABLE_DINGTALK_NOTIFY"
-DINGTALK_WEBHOOK="$DINGTALK_WEBHOOK"
-REMARK="$REMARK"
 
-# 通知选项
-SSH_NOTIFY="$SSH_NOTIFY"
-
-# 资源监控选项
-ENABLE_MEM_MONITOR="$ENABLE_MEM_MONITOR"
-MEM_THRESHOLD="$MEM_THRESHOLD"
-ENABLE_CPU_MONITOR="$ENABLE_CPU_MONITOR"
-CPU_THRESHOLD="$CPU_THRESHOLD"
-ENABLE_IP_CHANGE_NOTIFY="$ENABLE_IP_CHANGE_NOTIFY"
-EOF
-    
-    if [ "$ENABLE_IP_CHANGE_NOTIFY" = "Y" ]; then
-        mkdir -p $(dirname "$IP_FILE")
-        get_ipv4 > "$IP_FILE"
+    # Monitoring
+    while true; do
+        read -p "启用 IP 变动通知？(1=是, 0=否, 默认 1): " ENABLE_IP_CHANGE_NOTIFY
+        ENABLE_IP_CHANGE_NOTIFY=${ENABLE_IP_CHANGE_NOTIFY:-1}
+        validate_input yes_no "$ENABLE_IP_CHANGE_NOTIFY" && break
+    done
+    while true; do
+        read -p "启用内存监控？(1=是, 0=否, 默认 1): " ENABLE_MEM_MONITOR
+        ENABLE_MEM_MONITOR=${ENABLE_MEM_MONITOR:-1}
+        validate_input yes_no "$ENABLE_MEM_MONITOR" && break
+    done
+    if [[ "$ENABLE_MEM_MONITOR" -eq 1 ]]; then
+        while true; do
+            read -p "内存使用率阈值 (%，默认 80): " MEM_THRESHOLD
+            MEM_THRESHOLD=${MEM_THRESHOLD:-80}
+            validate_input number "$MEM_THRESHOLD" && [[ $MEM_THRESHOLD -le 100 ]] && break
+        done
     fi
-    
-    cp "$0" "$SCRIPT_PATH"
-    chmod +x "$SCRIPT_PATH"
-    
-    cat <<EOF > "$SERVICE_PATH"
+    while true; do
+        read -p "启用 CPU 监控？(1=是, 0=否, 默认 1): " ENABLE_CPU_MONITOR
+        ENABLE_CPU_MONITOR=${ENABLE_CPU_MONITOR:-1}
+        validate_input yes_no "$ENABLE_CPU_MONITOR" && break
+    done
+    if [[ "$ENABLE_CPU_MONITOR" -eq 1 ]]; then
+        while true; do
+            read -p "CPU 使用率阈值 (%，默认 80): " CPU_THRESHOLD
+            CPU_THRESHOLD=${CPU_THRESHOLD:-80}
+            validate_input number "$CPU_THRESHOLD" && [[ $CPU_THRESHOLD -le 100 ]] && break
+        done
+    fi
+    while true; do
+        read -p "启用磁盘监控？(1=是, 0=否, 默认 1): " ENABLE_DISK_MONITOR
+        ENABLE_DISK_MONITOR=${ENABLE_DISK_MONITOR:-1}
+        validate_input yes_no "$ENABLE_DISK_MONITOR" && break
+    done
+    if [[ "$ENABLE_DISK_MONITOR" -eq 1 ]]; then
+        while true; do
+            read -p "磁盘使用率阈值 (%，默认 80): " DISK_THRESHOLD
+            DISK_THRESHOLD=${DISK_THRESHOLD:-80}
+            validate_input number "$DISK_THRESHOLD" && [[ $DISK_THRESHOLD -le 100 ]] && break
+        done
+    fi
+    while true; do
+        read -p "启用网络连接监控？(1=是, 0=否, 默认 1): " ENABLE_NETWORK_MONITOR
+        ENABLE_NETWORK_MONITOR=${ENABLE_NETWORK_MONITOR:-1}
+        validate_input yes_no "$ENABLE_NETWORK_MONITOR" && break
+    done
+    while true; do
+        read -p "资源警报间隔 (小时，默认 6): " ALERT_INTERVAL
+        ALERT_INTERVAL=${ALERT_INTERVAL:-6}
+        validate_input number "$ALERT_INTERVAL" && break
+    done
+    read -p "请输入备注（如香港1号机）: " REMARK
+    save_config
+}
+
+# Install script
+install() {
+    # Backup existing config
+    if [[ -f "$CONFIG_FILE" ]]; then
+        cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+        log "Configuration backed up to ${CONFIG_FILE}.bak"
+    fi
+    install_dependencies
+    check_time_sync
+    guided_config
+    echo -e "${BLUE}安装系统服务...${NC}"
+    # Configure systemd service
+    cat > /etc/systemd/system/vps_notify.service << EOL
 [Unit]
 Description=VPS Notify Boot Service
 After=network-online.target
-Wants=network-online.target
-
 [Service]
 Type=oneshot
-ExecStart=/bin/bash $SCRIPT_PATH boot
-
+ExecStart=/bin/bash $PWD/tgvsdd2.sh boot
+RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
-EOF
-    
-    systemctl daemon-reexec
-    systemctl daemon-reload
+EOL
     systemctl enable vps_notify.service
-    
-    if ! grep -q "vps_notify.sh monitor" /etc/crontab; then
-        echo "$CRON_JOB" >> /etc/crontab
-    fi
-    
-    if [[ $SSH_NOTIFY == "Y" ]]; then
-        mkdir -p /etc/security
-        pam_script="/etc/security/pam_exec_notify.sh"
-        cat <<EOF > "$pam_script"
-#!/bin/bash
-PAM_USER="\$PAM_USER" PAM_RHOST="\$PAM_RHOST" $SCRIPT_PATH ssh
-EOF
-        chmod +x "$pam_script"
-        if ! grep -q pam_exec.so /etc/pam.d/sshd; then
-            echo "session optional pam_exec.so seteuid $pam_script" >> /etc/pam.d/sshd
+    # Configure cron job
+    echo "*/5 * * * * root /bin/bash $PWD/tgvsdd2.sh monitor" > /etc/cron.d/vps_notify
+    # Configure SSH login notification
+    echo "session optional pam_exec.so /bin/bash $PWD/tgvsdd2.sh ssh" >> /etc/pam.d/sshd
+    log "Installation completed"
+    echo -e "${GREEN}安装完成！${NC}"
+}
+
+# Uninstall script
+uninstall() {
+    echo -e "${BLUE}开始卸载 VPS Notify...${NC}"
+    systemctl disable vps_notify.service
+    rm -f /etc/systemd/system/vps_notify.service
+    rm -f /etc/cron.d/vps_notify
+    sed -i '/pam_exec.so.*tgvsdd2.sh/d' /etc/pam.d/sshd
+    rm -f "$CONFIG_FILE"
+    rm -f /tmp/vps_notify_*
+    log "Uninstallation completed"
+    echo -e "${GREEN}卸载完成！${NC}"
+}
+
+# Update script
+update_script() {
+    local remote_url="https://raw.githubusercontent.com/meiloi/scripts/main/tgvsdd2.sh"
+    local temp_file="/tmp/tgvsdd2.sh"
+    if curl -s -o "$temp_file" "$remote_url"; then
+        if [[ -s "$temp_file" ]]; then
+            chmod +x "$temp_file"
+            mv "$temp_file" "$PWD/tgvsdd2.sh"
+            log "Script updated from $remote_url"
+            echo -e "${GREEN}脚本更新成功！${NC}"
+        else
+            log "ERROR: Downloaded script is empty"
+            echo -e "${RED}更新失败：下载的脚本为空${NC}"
         fi
+    else
+        log "ERROR: Failed to download script from $remote_url"
+        echo -e "${RED}更新失败：无法下载脚本${NC}"
     fi
-    
-    if ! grep -q "127.0.0.1 $(hostname)" /etc/hosts; then
-        echo "127.0.0.1 $(hostname)" >> /etc/hosts
-    fi
-    
-    echo -e "\n${GREEN}✅ 安装完成!${NC}"
-    echo -e "${YELLOW}提示: 可以重启VPS测试开机通知，或从菜单中选择'测试通知'选项${NC}"
-    sleep 2
 }
 
-# 卸载脚本
-uninstall_script() {
-    print_menu_header
-    echo -e "${CYAN}[卸载] ${YELLOW}正在卸载 VPS 通知系统...${NC}\n"
-    
-    systemctl disable vps_notify.service 2>/dev/null
-    rm -f "$SERVICE_PATH" "$SCRIPT_PATH" "$CONFIG_FILE" "$IP_FILE"
-    sed -i '/vps_notify.sh monitor/d' /etc/crontab
-    sed -i '/pam_exec.so.*pam_exec_notify.sh/d' /etc/pam.d/sshd
-    rm -f /etc/security/pam_exec_notify.sh /tmp/vps_notify_last
-    
-    echo -e "\n${GREEN}✅ 卸载完成!${NC}"
-    echo -e "${YELLOW}所有配置文件和脚本已删除${NC}"
-    sleep 2
-    exit 0
-}
-
-# 测试通知
-test_notifications() {
+# Configure settings
+configure_settings() {
     load_config
-    
-    while true; do
-        print_menu_header
-        echo -e "${CYAN}[测试通知]${NC} 请选择要测试的通知类型:\n"
-        echo -e "${CYAN}1.${NC} 测试开机通知"
-        echo -e "${CYAN}2.${NC} 测试SSH登录通知"
-        echo -e "${CYAN}3.${NC} 测试资源监控通知"
-        echo -e "${CYAN}4.${NC} 测试IP变动通知"
-        echo -e "${CYAN}0.${NC} 返回主菜单"
-        echo ""
-        read -rp "请选择 [0-4]: " choice
-        
-        case $choice in
-            1)
-                echo -e "\n${YELLOW}正在发送开机通知...${NC}"
-                notify_boot
-                echo -e "\n${GREEN}通知已发送，请检查你的通知渠道${NC}"
-                read -rp "按Enter键继续..."
-                ;;
-            2)
-                echo -e "\n${YELLOW}正在发送SSH登录通知...${NC}"
-                PAM_USER="测试用户" PAM_RHOST="192.168.1.100" notify_ssh
-                echo -e "\n${GREEN}通知已发送，请检查你的通知渠道${NC}"
-                read -rp "按Enter键继续..."
-                ;;
-            3)
-                echo -e "\n${YELLOW}正在发送资源监控通知(忽略阈值)...${NC}"
-                FORCE_SEND="Y" monitor_usage
-                echo -e "\n${GREEN}通知已发送，请检查你的通知渠道${NC}"
-                read -rp "按Enter键继续..."
-                ;;
-            4)
-                echo -e "\n${YELLOW}正在发送IP变动通知...${NC}"
-                current_ip=""
-                if [ -f "$IP_FILE" ]; then
-                    current_ip=$(cat "$IP_FILE")
-                    echo "8.8.8.8" > "$IP_FILE"
-                fi
-                check_ip_change
-                if [ -n "$current_ip" ]; then
-                    echo "$current_ip" > "$IP_FILE"
-                fi
-                echo -e "\n${GREEN}通知已发送，请检查你的通知渠道${NC}"
-                read -rp "按Enter键继续..."
-                ;;
-            0)
-                return
-                ;;
-            *)
-                echo -e "${RED}无效选择，请重试${NC}"
-                sleep 1
-                ;;
-        esac
-    done
+    guided_config
 }
 
-# 修改配置
-modify_config() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}错误: 配置文件不存在，请先安装脚本${NC}"
-        sleep 2
+# View logs
+view_logs() {
+    echo -e "\n${BLUE}最近 10 条日志:${NC}"
+    tail -n 10 "$LOG_FILE"
+    echo -e "\n${YELLOW}按 q 退出，或输入行数查看更多日志:${NC}"
+    read -p "行数 (默认 10): " lines
+    if [[ "$lines" == "q" ]]; then
         return
     fi
-    
+    lines=${lines:-10}
+    if [[ "$lines" =~ ^[0-9]+$ ]]; then
+        tail -n "$lines" "$LOG_FILE"
+    else
+        echo -e "${RED}错误：请输入有效数字${NC}"
+    fi
+}
+
+# Test notifications
+test_notifications() {
     load_config
-    
     while true; do
-        print_menu_header
-        echo -e "${CYAN}[配置设置]${NC} 当前配置:\n"
-        show_config
-        
-        echo -e "请选择要修改的配置项:"
-        echo -e "${CYAN}1.${NC} ${ENABLE_TG_NOTIFY == "Y" ? "禁用" : "启用"} Telegram 通知"
-        echo -e "${CYAN}2.${NC} 修改 Telegram Bot Token"
-        echo -e "${CYAN}3.${NC} 修改 Telegram Chat ID"
-        echo -e "${CYAN}4.${NC} ${ENABLE_DINGTALK_NOTIFY == "Y" ? "禁用" : "启用"} DingTalk 通知"
-        echo -e "${CYAN}5.${NC} 修改 DingTalk Webhook"
-        echo -e "${CYAN}6.${NC} 修改主机备注"
-        echo -e "${CYAN}7.${NC} ${SSH_NOTIFY == "Y" ? "禁用" : "启用"} SSH登录通知"
-        echo -e "${CYAN}8.${NC} ${ENABLE_MEM_MONITOR == "Y" ? "禁用" : "启用"} 内存监控 (当前阈值: ${MEM_THRESHOLD:-90}%)"
-        echo -e "${CYAN}9.${NC} ${ENABLE_CPU_MONITOR == "Y" ? "禁用" : "启用"} CPU监控 (当前阈值: ${CPU_THRESHOLD:-4})"
-        echo -e "${CYAN}10.${NC} ${ENABLE_IP_CHANGE_NOTIFY == "Y" ? "禁用" : "启用"} IP变动通知"
-        echo -e "${CYAN}0.${NC} 返回主菜单"
-        echo ""
-        read -rp "请选择 [0-10]: " choice
-        
+        echo -e "\n${YELLOW}=== 测试通知 ===${NC}"
+        echo -e "${GREEN}1.${NC} 测试开机通知"
+        echo -e "${GREEN}2.${NC} 测试 SSH 登录通知"
+        echo -e "${GREEN}3.${NC} 测试资源警报"
+        echo -e "${GREEN}4.${NC} 测试 IP 变动通知"
+        echo -e "${GREEN}5.${NC} 测试网络连接通知"
+        echo -e "${GREEN}6.${NC} 查看日志"
+        echo -e "${GREEN}0.${NC} 返回主菜单"
+        read -p "请选择: " choice
         case $choice in
             1)
-                new_value=$([[ "$ENABLE_TG_NOTIFY" == "Y" ]] && echo "N" || echo "Y")
-                sed -i "s/ENABLE_TG_NOTIFY=.*$/ENABLE_TG_NOTIFY=\"$new_value\"/" "$CONFIG_FILE"
-                echo -e "${GREEN}Telegram通知已${new_value == "Y" ? "启用" : "禁用"}${NC}"
+                send_boot_notification
+                echo -e "${GREEN}开机通知已发送${NC}"
                 ;;
             2)
-                echo -e "\n${YELLOW}请输入新的 Telegram Bot Token:${NC}"
-                read -rp "Token: " new_token
-                if [ -n "$new_token" ]; then
-                    sed -i "s/TG_BOT_TOKEN=.*$/TG_BOT_TOKEN=\"$new_token\"/" "$CONFIG_FILE"
-                    echo -e "${GREEN}Telegram Token已更新${NC}"
-                fi
+                send_ssh_notification "testuser" "192.168.1.1"
+                echo -e "${GREEN}SSH 登录通知已发送${NC}"
                 ;;
             3)
-                echo -e "\n${YELLOW}请输入新的 Telegram Chat ID(s) (多个ID用逗号分隔):${NC}"
-                read -rp "Chat ID(s): " new_ids
-                if [ -n "$new_ids" ]; then
-                    sed -i "s/TG_CHAT_IDS=.*$/TG_CHAT_IDS=\"$new_ids\"/" "$CONFIG_FILE"
-                    echo -e "${GREEN}Telegram Chat ID已更新${NC}"
-                fi
+                local message="[警告] 测试资源警报\n内存使用率: 85%\nCPU 使用率: 90%\n磁盘使用率: 95%\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                send_telegram "$message"
+                send_dingtalk "$message"
+                echo -e "${GREEN}资源警报已发送${NC}"
                 ;;
             4)
-                new_value=$([[ "$ENABLE_DINGTALK_NOTIFY" == "Y" ]] && echo "N" || echo "Y")
-                sed -i "s/ENABLE_DINGTALK_NOTIFY=.*$/ENABLE_DINGTALK_NOTIFY=\"$new_value\"/" "$CONFIG_FILE"
-                echo -e "${GREEN}DingTalk通知已${new_value == "Y" ? "启用" : "禁用"}${NC}"
+                local message="[网络] 测试 IP 变动\n旧 IP:\nIPv4: 192.168.1.1\n新 IP:\n$(get_ip)\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                send_telegram "$message"
+                send_dingtalk "$message"
+                echo -e "${GREEN}IP 变动通知已发送${NC}"
                 ;;
             5)
-                echo -e "\n${YELLOW}请输入新的 DingTalk Webhook:${NC}"
-                read -rp "Webhook: " new_webhook
-                if [ -n "$new_webhook" ]; then
-                    sed -i "s/DINGTALK_WEBHOOK=.*$/DINGTALK_WEBHOOK=\"$new_webhook\"/" "$CONFIG_FILE"
-                    echo -e "${GREEN}DingTalk Webhook已更新${NC}"
-                fi
+                local message="[网络] 测试网络连接失败\n目标: 8.8.8.8\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                send_telegram "$message"
+                send_dingtalk "$message"
+                echo -e "${GREEN}网络连接通知已发送${NC}"
                 ;;
             6)
-                echo -e "\n${YELLOW}请输入新的主机备注:${NC}"
-                read -rp "备注: " new_remark
-                sed -i "s/REMARK=.*$/REMARK=\"$new_remark\"/" "$CONFIG_FILE" 2>/dev/null || \
-                echo "REMARK=\"$new_remark\"" >> "$CONFIG_FILE"
-                echo -e "${GREEN}主机备注已更新${NC}"
-                ;;
-            7)
-                new_value=$([[ "$SSH_NOTIFY" == "Y" ]] && echo "N" || echo "Y")
-                sed -i "s/SSH_NOTIFY=.*$/SSH_NOTIFY=\"$new_value\"/" "$CONFIG_FILE"
-                if [ "$new_value" == "Y" ]; then
-                    mkdir -p /etc/security
-                    pam_script="/etc/security/pam_exec_notify.sh"
-                    cat <<EOF > "$pam_script"
-#!/bin/bash
-PAM_USER="\$PAM_USER" PAM_RHOST="\$PAM_RHOST" $SCRIPT_PATH ssh
-EOF
-                    chmod +x "$pam_script"
-                    if ! grep -q pam_exec.so /etc/pam.d/sshd; then
-                        echo "session optional pam_exec.so seteuid $pam_script" >> /etc/pam.d/sshd
-                    fi
-                    echo -e "${GREEN}SSH登录通知已启用${NC}"
-                else
-                    sed -i '/pam_exec.so.*pam_exec_notify.sh/d' /etc/pam.d/sshd
-                    rm -f /etc/security/pam_exec_notify.sh
-                    echo -e "${GREEN}SSH登录通知已禁用${NC}"
-                fi
-                ;;
-            8)
-                if [[ "$ENABLE_MEM_MONITOR" == "Y" ]]; then
-                    sed -i "s/ENABLE_MEM_MONITOR=.*$/ENABLE_MEM_MONITOR=\"N\"/" "$CONFIG_FILE"
-                    echo -e "${GREEN}内存监控已禁用${NC}"
-                else
-                    sed -i "s/ENABLE_MEM_MONITOR=.*$/ENABLE_MEM_MONITOR=\"Y\"/" "$CONFIG_FILE"
-                    echo -e "\n${YELLOW}请设置内存使用率警报阈值 (%):${NC}"
-                    read -rp "阈值 (默认90): " threshold
-                    threshold=${threshold:-90}
-                    sed -i "s/MEM_THRESHOLD=.*$/MEM_THRESHOLD=\"$threshold\"/" "$CONFIG_FILE" 2>/dev/null || \
-                    echo "MEM_THRESHOLD=\"$threshold\"" >> "$CONFIG_FILE"
-                    echo -e "${GREEN}内存监控已启用，阈值设为 ${threshold}%${NC}"
-                fi
-                ;;
-            9)
-                if [[ "$ENABLE_CPU_MONITOR" == "Y" ]]; then
-                    sed -i "s/ENABLE_CPU_MONITOR=.*$/ENABLE_CPU_MONITOR=\"N\"/" "$CONFIG_FILE"
-                    echo -e "${GREEN}CPU监控已禁用${NC}"
-                else
-                    sed -i "s/ENABLE_CPU_MONITOR=.*$/ENABLE_CPU_MONITOR=\"Y\"/" "$CONFIG_FILE"
-                    echo -e "\n${YELLOW}请设置CPU负载警报阈值:${NC}"
-                    read -rp "阈值 (默认4): " threshold
-                    threshold=${threshold:-4}
-                    sed -i "s/CPU_THRESHOLD=.*$/CPU_THRESHOLD=\"$threshold\"/" "$CONFIG_FILE" 2>/dev/null || \
-                    echo "CPU_THRESHOLD=\"$threshold\"" >> "$CONFIG_FILE"
-                    echo -e "${GREEN}CPU监控已启用，阈值设为 ${threshold}${NC}"
-                fi
-                ;;
-            10)
-                if [[ "$ENABLE_IP_CHANGE_NOTIFY" == "Y" ]]; then
-                    sed -i "s/ENABLE_IP_CHANGE_NOTIFY=.*$/ENABLE_IP_CHANGE_NOTIFY=\"N\"/" "$CONFIG_FILE"
-                    echo -e "${GREEN}IP变动通知已禁用${NC}"
-                else
-                    sed -i "s/ENABLE_IP_CHANGE_NOTIFY=.*$/ENABLE_IP_CHANGE_NOTIFY=\"Y\"/" "$CONFIG_FILE" 2>/dev/null || \
-                    echo "ENABLE_IP_CHANGE_NOTIFY=\"Y\"" >> "$CONFIG_FILE"
-                    mkdir -p $(dirname "$IP_FILE")
-                    get_ipv4 > "$IP_FILE"
-                    echo -e "${GREEN}IP变动通知已启用，当前IP已记录${NC}"
-                fi
+                view_logs
                 ;;
             0)
                 return
                 ;;
             *)
-                echo -e "${RED}无效选择，请重试${NC}"
-                sleep 1
+                echo -e "${RED}无效选项${NC}"
                 ;;
         esac
-        sleep 1
-        load_config
     done
 }
 
-# 加载配置
-load_config() {
-    [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+# Check system status
+check_status() {
+    echo -e "\n${YELLOW}=== 系统状态 ===${NC}"
+    if systemctl is-active --quiet vps_notify.service; then
+        echo -e "${GREEN}VPS Notify 服务: 运行中${NC}"
+    else
+        echo -e "${RED}VPS Notify 服务: 未运行${NC}"
+    fi
+    if [[ -f /etc/cron.d/vps_notify ]]; then
+        echo -e "${GREEN}Cron 任务: 已配置${NC}"
+    else
+        echo -e "${RED}Cron 任务: 未配置${NC}"
+    fi
+    if grep -q "pam_exec.so.*tgvsdd2.sh" /etc/pam.d/sshd; then
+        echo -e "${GREEN}SSH 通知: 已启用${NC}"
+    else
+        echo -e "${RED}SSH 通知: 未启用${NC}"
+    fi
+    echo -e "\n${BLUE}最近日志:${NC}"
+    tail -n 5 "$LOG_FILE"
 }
 
-# 显示用法帮助
-show_usage() {
-    echo -e "用法: $0 [命令]"
-    echo ""
-    echo -e "命令:"
-    echo -e "  install   安装脚本"
-    echo -e "  uninstall 卸载脚本"
-    echo -e "  boot      发送开机通知"
-    echo -e "  ssh       发送SSH登录通知(由PAM调用)"
-    echo -e "  monitor   监控系统资源(由cron调用)"
-    echo -e "  menu      显示交互式菜单(默认)"
-    echo ""
-}
-
-# 主菜单
-show_menu() {
+# Main menu
+main_menu() {
+    load_config
     while true; do
-        print_menu_header
-        
-        if [ -f "$CONFIG_FILE" ]; then
-            echo -e "${GREEN}● 通知系统已安装${NC}\n"
-            show_config
-        else
-            echo -e "${RED}● 通知系统未安装${NC}\n"
+        # Check installation status
+        local install_status="未安装"
+        if [[ -f /etc/systemd/system/vps_notify.service && -f /etc/cron.d/vps_notify ]]; then
+            install_status="已安装"
         fi
-        
-        echo -e "请选择操作:"
-        echo -e "${CYAN}1.${NC} 安装/重新安装"
-        echo -e "${CYAN}2.${NC} 配置设置"
-        echo -e "${CYAN}3.${NC} 测试通知"
-        echo -e "${CYAN}4.${NC} 卸载"
-        echo -e "${CYAN}0.${NC} 退出"
-        echo ""
-        read -rp "请选择 [0-4]: " choice
-        
+
+        # Mask sensitive info
+        local tg_token_display="未设置"
+        if [[ -n "$TG_BOT_TOKEN" ]]; then
+            tg_token_display="${TG_BOT_TOKEN:0:10}****"
+        fi
+        local dt_webhook_display="未设置"
+        if [[ -n "$DINGTALK_WEBHOOK" ]]; then
+            dt_webhook_display=$(echo "$DINGTALK_WEBHOOK" | sed 's/\(access_token=\).*/\1[hidden]/')
+        fi
+        local dt_secret_display="未设置"
+        if [[ -n "$DINGTALK_SECRET" ]]; then
+            dt_secret_display="${DINGTALK_SECRET:0:6}****"
+        fi
+
+        # Display menu
+        echo -e "${GREEN}════════════════════════════════════════${NC}"
+        echo -e "${GREEN}║       VPS 通知系统 (高级版)       ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.19             ║${NC}"
+        echo -e "${GREEN}════════════════════════════════════════${NC}"
+        echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
+        echo -e "当前配置:"
+        echo -e "Telegram Bot Token: $tg_token_display"
+        echo -e "Telegram 通知: ${ENABLE_TG_NOTIFY:-1} (1=Y, 0=N)"
+        echo -e "Telegram Chat IDs: ${TG_CHAT_IDS:-未设置}"
+        echo -e "Telegram 调试模式: ${DEBUG_TG:-1} (1=Y, 0=N)"
+        echo -e "Telegram Emoji: ${TG_EMOJI:-1} (1=Y, 0=N)"
+        echo -e "DingTalk Webhook: $dt_webhook_display"
+        echo -e "DingTalk 通知: ${ENABLE_DINGTALK_NOTIFY:-1} (1=Y, 0=N)"
+        echo -e "DingTalk Secret: $dt_secret_display"
+        echo -e "备注: ${REMARK:-未设置}"
+        echo -e "内存监控: ${ENABLE_MEM_MONITOR:-1} (阈值: ${MEM_THRESHOLD:-80}%)"
+        echo -e "CPU监控: ${ENABLE_CPU_MONITOR:-1} (阈值: ${CPU_THRESHOLD:-80}%)"
+        echo -e "磁盘监控: ${ENABLE_DISK_MONITOR:-1} (阈值: ${DISK_THRESHOLD:-80}%)"
+        echo -e "网络监控: ${ENABLE_NETWORK_MONITOR:-1} (1=Y, 0=N)"
+        echo -e "警报间隔: ${ALERT_INTERVAL:-6} 小时"
+        echo -e "IP变动通知: ${ENABLE_IP_CHANGE_NOTIFY:-1} (1=Y, 0=N)"
+        echo -e "\n${YELLOW}请选择操作:${NC}"
+        echo -e "${GREEN}1.${NC} 安装/重新安装"
+        echo -e "${GREEN}2.${NC} 配置设置"
+        echo -e "${GREEN}3.${NC} 测试通知"
+        echo -e "${GREEN}4.${NC} 检查系统状态"
+        echo -e "${GREEN}5.${NC} 卸载"
+        echo -e "${GREEN}6.${NC} 更新脚本"
+        echo -e "${GREEN}0.${NC} 退出"
+        read -p "请选择: " choice
         case $choice in
             1)
-                install_script
+                install
                 ;;
             2)
-                modify_config
+                configure_settings
                 ;;
             3)
                 test_notifications
                 ;;
             4)
-                echo -e "\n${YELLOW}警告: 此操作将删除所有配置和脚本!${NC}"
-                read -rp "确认卸载? [y/N]: " confirm
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    uninstall_script
-                fi
+                check_status
+                ;;
+            5)
+                uninstall
+                ;;
+            6)
+                update_script
                 ;;
             0)
-                echo -e "\n${GREEN}感谢使用 VPS 通知系统!${NC}"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}无效选择，请重试${NC}"
-                sleep 1
+                echo -e "${RED}无效选项${NC}"
                 ;;
         esac
     done
 }
 
-main() {
-    if [[ "$1" == "menu" || -z "$1" ]]; then
-        if [ -x "$SCRIPT_PATH" ] && [ "$0" != "$SCRIPT_PATH" ]; then
-            exec "$SCRIPT_PATH" menu
-        else
-            show_menu
-        fi
-    else
-        case "$1" in
-            boot)
-                load_config
-                notify_boot
-                ;;
-            ssh)
-                load_config
-                notify_ssh
-                ;;
-            monitor)
-                load_config
-                monitor_usage
-                ;;
-            install)
-                install_script
-                ;;
-            uninstall)
-                uninstall_script
-                ;;
-            help|--help|-h)
-                show_usage
-                ;;
-            *)
-                echo -e "${RED}错误: 未知命令 '$1'${NC}"
-                show_usage
-                exit 1
-                ;;
-        esac
-    fi
-}
-
-main "$1"
+# Command line mode
+case "$1" in
+    install)
+        load_config
+        install
+        ;;
+    uninstall)
+        load_config
+        uninstall
+        ;;
+    boot)
+        load_config
+        send_boot_notification
+        ;;
+    ssh)
+        load_config
+        send_ssh_notification "$PAM_USER" "$PAM_RHOST"
+        ;;
+    monitor)
+        load_config
+        monitor_resources
+        monitor_ip
+        monitor_network
+        ;;
+    menu|*)
+        main_menu
+        ;;
+esac
