@@ -1,6 +1,6 @@
 VPS Notify (tgvsdd2.sh)
 
-tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 和 DingTalk 通知，帮助用户实时监控 VPS 的 IP 变动、SSH 登录、系统资源使用情况以及开机状态。相比早期版本（tgvsdd1.sh），本脚本增加了多渠道通知、交互式菜单、自动化安装、更新功能和更健壮的错误处理，适合 Linux VPS（Debian/Ubuntu/CentOS 等）。
+tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 和 DingTalk 通知，帮助用户实时监控 VPS 的 IP 变动、SSH 登录、系统资源使用情况以及开机状态。相比早期版本（tgvsdd1.sh），本脚本增加了多渠道通知、交互式菜单、自动化安装、更新功能、钉钉加签支持和更健壮的错误处理，适合 Linux VPS（Debian/Ubuntu/CentOS 等）。
 功能特性
 
 多渠道通知：
@@ -25,7 +25,7 @@ tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 
 自动化安装：
 自动配置 systemd 服务（开机通知）和 cron 任务（每5分钟监控）。
 集成 SSH 登录通知（通过 PAM）。
-自动安装依赖（curl、grep、awk 等）。
+自动安装依赖（curl、grep、awk、openssl 等）。
 
 
 日志管理：
@@ -36,6 +36,7 @@ tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 
 灵活配置：
 通过 /etc/vps_notify.conf 管理配置，支持动态修改。
 支持自定义主机备注（REMARK）。
+支持钉钉加签（DINGTALK_SECRET）。
 
 
 脚本更新：
@@ -46,7 +47,7 @@ tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 
 依赖
 
 系统：Debian、Ubuntu、CentOS 或其他支持 bash 的 Linux 系统。
-命令：curl、grep、awk、systemctl、df（脚本会自动尝试安装）。
+命令：curl、grep、awk、systemctl、df、openssl（脚本会自动尝试安装）。
 网络：需要访问 raw.githubusercontent.com 和通知服务 API（Telegram/DingTalk）。
 
 安装
@@ -60,6 +61,7 @@ curl -o tgvsdd2.sh -fsSL https://raw.githubusercontent.com/meiloi/scripts/main/t
 
 在菜单中选择 1. 安装/重新安装。
 按照提示配置通知渠道（Telegram/DingTalk）、主机备注和监控选项。
+如果使用钉钉加签，输入 DINGTALK_SECRET。
 脚本会自动完成 systemd 服务、cron 任务和 SSH 通知的设置。
 
 
@@ -79,7 +81,7 @@ curl -o tgvsdd2.sh -fsSL https://raw.githubusercontent.com/meiloi/scripts/main/t
 运行 ./tgvsdd2.sh 进入主菜单，支持以下选项：
 
 1. 安装/重新安装：配置并安装脚本。
-2. 配置设置：修改通知渠道、阈值或备注。
+2. 配置设置：修改通知渠道、阈值、备注或钉钉加签。
 3. 测试通知：发送测试通知（开机、SSH、资源、IP 变动）。
 4. 检查系统状态：查看服务、cron 和日志状态。
 5. 卸载：删除脚本和所有相关文件。
@@ -101,7 +103,7 @@ menu：显示交互式菜单（默认）。
 配置管理
 配置文件位于 /etc/vps_notify.conf，包含：
 
-通知设置（ENABLE_TG_NOTIFY、TG_BOT_TOKEN、TG_CHAT_IDS、ENABLE_DINGTALK_NOTIFY、DINGTALK_WEBHOOK）。
+通知设置（ENABLE_TG_NOTIFY、TG_BOT_TOKEN、TG_CHAT_IDS、ENABLE_DINGTALK_NOTIFY、DINGTALK_WEBHOOK、DINGTALK_SECRET）。
 监控选项（ENABLE_MEM_MONITOR、MEM_THRESHOLD、ENABLE_CPU_MONITOR、CPU_THRESHOLD、ENABLE_DISK_MONITOR、DISK_THRESHOLD、ENABLE_IP_CHANGE_NOTIFY）。
 主机备注（REMARK）。
 
@@ -124,9 +126,9 @@ DingTalk：
 点击“添加机器人”，选择“自定义机器人”。
 输入机器人名称（例如“VPS Notify”）。
 选择安全设置：
-推荐“自定义关键词”（输入关键词如“VPS”或“通知”）。
-避免“加签”以简化配置，除非必要。
-可选“IP 地址”白名单，需添加 VPS 的公网 IP（运行 curl -s4m 3 ip.sb 获取）。
+推荐：选择“自定义关键词”（输入关键词如“VPS”或“通知”）。
+加签：如果启用，复制 secret（以 SEC 开头），在脚本配置中输入。
+IP 地址：可选，需添加 VPS 公网 IP（运行 curl -s4m 3 ip.sb 获取）。
 
 
 点击“完成”，复制 Webhook URL（格式如 https://oapi.dingtalk.com/robot/send?access_token=xxx）。
@@ -155,15 +157,19 @@ Telegram：
 DingTalk：
 验证 Webhook 是否有效：curl -s -X POST "https://oapi.dingtalk.com/robot/send?access_token=<你的token>" \
     -H "Content-Type: application/json" \
-    -d '{"msgtype": "text", "text": {"content": "测试消息"}}'
+    -d '{"msgtype": "text", "text": {"content": "VPS 测试消息"}}'
+
+
+如果使用加签，验证 DINGTALK_SECRET 是否正确：cat /etc/vps_notify.conf | grep DINGTALK_SECRET
 
 
 常见错误码：
-300005：token is not exist - Webhook 失效或 token 错误。重新生成 Webhook（见“获取 DingTalk 配置”）。
+300005：token is not exist - Webhook 失效或 token 错误。重新生成 Webhook。
 400：无效的 access_token - 检查 Webhook URL 是否完整。
-403：IP 不在白名单 - 在钉钉后台添加 VPS IP 或禁用 IP 限制。
+403：关键词或 IP 不在白名单 - 确保消息包含关键词（如“VPS”）或添加 VPS IP。
 310000：消息内容为空或格式错误 - 确保消息包含 content 字段。
 42001：access_token 过期 - 重新生成 Webhook。
+加签错误：签名不匹配 - 验证 DINGTALK_SECRET 和系统时间（需与钉钉服务器同步）。
 
 
 确保 VPS 可以访问 oapi.dingtalk.com：curl -I https://oapi.dingtalk.com
@@ -174,7 +180,7 @@ DingTalk：
 
 
 依赖缺失：
-手动安装：apt update && apt install -y curl grep gawk systemd coreutils
+手动安装：apt update && apt install -y curl grep gawk systemd coreutils openssl
 
 
 
@@ -195,6 +201,13 @@ IP 获取失败：
 
 
 
+时间同步（加签相关）：
+确保系统时间与钉钉服务器同步：timedatectl
+ntpdate pool.ntp.org
+
+
+
+
 其他问题：
 提交 issue 到 GitHub 仓库（meiloi/scripts）。
 提供日志输出和错误信息。
@@ -203,10 +216,10 @@ IP 获取失败：
 
 示例日志
 /var/log/vps_notify.log
-[2025-05-17 08:00:00] Installation completed
-[2025-05-17 08:05:00] Sent boot notification
-[2025-05-17 08:10:00] IP changed from 192.168.1.1 to 192.168.1.2
-[2025-05-17 09:00:00] ERROR: Invalid DingTalk webhook: {"errcode":300005,"errmsg":"token is not exist"}
+[2025-05-17 10:00:00] Installation completed
+[2025-05-17 10:05:00] Sent boot notification
+[2025-05-17 10:10:00] IP changed from 192.168.1.1 to 192.168.1.2
+[2025-05-17 11:00:00] ERROR: Invalid DingTalk webhook: {"errcode":300005,"errmsg":"token is not exist"}
 
 贡献
 欢迎提交 Pull Request 或 Issue 来改进脚本！请遵循以下步骤：
@@ -219,10 +232,15 @@ Fork 仓库。
 
 变更日志
 
-v2.1 (2025-05-17)：
+v2.2 (2025-05-17)：
+新增钉钉加签支持（DINGTALK_SECRET），兼容“加签”安全策略。
+增强 validate_dingtalk 和 send_dingtalk，支持签名验证和详细错误日志。
+更新 README，补充加签配置和时间同步说明。
+
+
+v2.1：
 新增“更新脚本”功能（菜单选项 6），支持从 GitHub 自动下载最新版本。
 增强钉钉通知错误处理，添加重试机制和详细日志。
-更新 README，补充钉钉 Webhook 配置和常见错误码（例如 300005）。
 
 
 v2.0：
