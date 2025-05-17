@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.4
+# VPS Notify Script (tgvsdd2.sh) v3.0.5
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.4 (2025-05-17)
+# Version: 3.0.5 (2025-05-17)
 # Changelog:
+# - v3.0.5: Fixed Telegram newline (use parse_mode=HTML with <br>), enhanced API response logging
 # - v3.0.4: Fixed Telegram newline (use parse_mode=MarkdownV2, escape special chars), added API response logging
 # - v3.0.3: Fixed Telegram notification newline (added parse_mode=Markdown), optimized remark prompt
 # - v3.0.2: Fixed log undefined error, fixed syntax error in get_ip and monitor_resources, improved compatibility
@@ -171,7 +172,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}×tamp=${timestamp}&sign=${sign}"
+            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
         fi
 
         # Send test message (includes keyword "VPS")
@@ -228,28 +229,29 @@ validate_input() {
     return 0
 }
 
-# Escape special characters for Telegram MarkdownV2
-escape_markdown_v2() {
+# Convert message to HTML for Telegram
+convert_to_html() {
     local text="$1"
-    # Escape special characters: . ! - + = | { } ( ) # > ` _ * [ ]
-    echo "$text" | sed 's/[\.\!\-\+\=\|\{\}\(\)\#>[`_*[]/\\&/g'
+    # Replace \n with <br>
+    echo "$text" | sed 's/\\n/<br>/g'
 }
 
 # Send Telegram notification
 send_telegram() {
     local message="$1"
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
-        # Escape message for MarkdownV2
-        local escaped_message=$(escape_markdown_v2 "$message")
+        # Convert message to HTML
+        local html_message=$(convert_to_html "$message")
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                 --data-urlencode "chat_id=${chat_id}" \
-                --data-urlencode "text=${escaped_message}" \
-                --data-urlencode "parse_mode=MarkdownV2")
+                --data-urlencode "text=${html_message}" \
+                --data-urlencode "parse_mode=HTML")
             if echo "$response" | grep -q '"ok":true'; then
                 log "Telegram notification sent to $chat_id: $message"
             else
-                log "ERROR: Failed to send Telegram message to $chat_id: $response"
+                local error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
+                log "ERROR: Failed to send Telegram message to $chat_id: $response (Description: $error_desc)"
             fi
         done
     fi
@@ -274,7 +276,7 @@ send_dingtalk() {
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${webhook}×tamp=${timestamp}&sign=${sign}"
+                url="${webhook}&timestamp=${timestamp}&sign=${sign}"
             fi
 
             response=$(curl -s -m 5 -X POST "$url" \
@@ -480,7 +482,7 @@ guided_config() {
                         local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                             --data-urlencode "chat_id=${chat_id}" \
                             --data-urlencode "text=${test_message}" \
-                            --data-urlencode "parse_mode=MarkdownV2")
+                            --data-urlencode "parse_mode=HTML")
                         if echo "$response" | grep -q '"ok":true'; then
                             valid_ids+="$chat_id,"
                         else
@@ -742,8 +744,8 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}════════════════════════════════════════${NC}"
-        echo -e "版本: 3.0.4\n"
+        echo -e cooling
+        echo -e "版本: 3.0.5\n"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
         echo -e "Telegram Bot Token: $tg_token_display"
