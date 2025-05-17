@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.5
+# VPS Notify Script (tgvsdd2.sh) v3.0.6
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.5 (2025-05-17)
+# Version: 3.0.6 (2025-05-17)
 # Changelog:
+# - v3.0.6: Fixed Telegram notification not showing (sanitize HTML, remove emoji, add retry with plain text), enhanced error checking, added debug mode
 # - v3.0.5: Fixed Telegram newline (use parse_mode=HTML with <br>), enhanced API response logging
 # - v3.0.4: Fixed Telegram newline (use parse_mode=MarkdownV2, escape special chars), added API response logging
 # - v3.0.3: Fixed Telegram notification newline (added parse_mode=Markdown), optimized remark prompt
@@ -24,8 +25,9 @@ CONFIG_FILE="/etc/vps_notify.conf"
 LOG_FILE="/var/log/vps_notify.log"
 LOG_MAX_SIZE=$((1024*1024)) # 1MB
 LOG_RETENTION_DAYS=7
+DEBUG_TG=0 # Debug mode for Telegram (1=enabled, 0=disabled)
 
-# Logging function (defined first to avoid undefined errors)
+# Logging function
 log() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$timestamp] $1" >> "$LOG_FILE"
@@ -105,6 +107,7 @@ load_config() {
         ENABLE_NETWORK_MONITOR=1
         ALERT_INTERVAL=6
         REMARK=""
+        DEBUG_TG=0
         log "Configuration file not found, using defaults"
     fi
 }
@@ -128,6 +131,7 @@ DISK_THRESHOLD=$DISK_THRESHOLD
 ENABLE_NETWORK_MONITOR=$ENABLE_NETWORK_MONITOR
 ALERT_INTERVAL=$ALERT_INTERVAL
 REMARK="$REMARK"
+DEBUG_TG=$DEBUG_TG
 EOL
     log "Configuration saved to $CONFIG_FILE"
 }
@@ -229,29 +233,52 @@ validate_input() {
     return 0
 }
 
-# Convert message to HTML for Telegram
-convert_to_html() {
+# Sanitize message for HTML
+sanitize_html() {
     local text="$1"
+    # Replace emoji with text
+    text=$(echo "$text" | sed 's/✅/[成功]/g; s/🔐/[登录]/g; s/⚠️/[警告]/g; s/🌐/[网络]/g')
     # Replace \n with <br>
-    echo "$text" | sed 's/\\n/<br>/g'
+    text=$(echo "$text" | sed 's/\\n/<br>/g')
+    # Escape special characters for HTML
+    echo "$text" | sed 's/[&<>]/\\&/g; s/:/\\:/g'
 }
 
 # Send Telegram notification
 send_telegram() {
     local message="$1"
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
-        # Convert message to HTML
-        local html_message=$(convert_to_html "$message")
+        # Sanitize and convert to HTML
+        local html_message=$(sanitize_html "$message")
+        if [[ "$DEBUG_TG" -eq 1 ]]; then
+            log "DEBUG: Original message: $message"
+            log "DEBUG: HTML message: $html_message"
+        fi
         for chat_id in ${TG_CHAT_IDS//,/ }; do
+            # Try HTML mode
             local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                 --data-urlencode "chat_id=${chat_id}" \
                 --data-urlencode "text=${html_message}" \
                 --data-urlencode "parse_mode=HTML")
-            if echo "$response" | grep -q '"ok":true'; then
-                log "Telegram notification sent to $chat_id: $message"
+            local is_ok=$(echo "$response" | grep -o '"ok":true')
+            local message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
+            local error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
+            if [[ -n "$is_ok" && -n "$message_id" ]]; then
+                log "Telegram notification sent to $chat_id (message_id: $message_id): $message"
             else
-                local error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
-                log "ERROR: Failed to send Telegram message to $chat_id: $response (Description: $error_desc)"
+                log "ERROR: Failed to send Telegram HTML message to $chat_id: $response (Description: $error_desc)"
+                # Retry with plain text
+                response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                    --data-urlencode "chat_id=${chat_id}" \
+                    --data-urlencode "text=$message")
+                is_ok=$(echo "$response" | grep -o '"ok":true')
+                message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
+                error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
+                if [[ -n "$is_ok" && -n "$message_id" ]]; then
+                    log "Telegram plain text retry succeeded to $chat_id (message_id: $message_id): $message"
+                else
+                    log "ERROR: Failed to send Telegram plain text message to $chat_id: $response (Description: $error_desc)"
+                fi
             fi
         done
     fi
@@ -368,7 +395,7 @@ monitor_resources() {
     fi
 
     if [[ -n "$message" ]]; then
-        message="⚠️ 资源警报\n$message时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+        message="[警告] 资源警报\n$message时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
         send_telegram "$message"
         send_dingtalk "$message"
         echo "$current_time" > "$last_alert_file"
@@ -385,7 +412,7 @@ monitor_ip() {
             old_ip=$(cat "$ip_file")
         fi
         if [[ "$current_ip" != "$old_ip" ]]; then
-            local message="🌐 IP 变动\n旧 IP:\n$old_ip\n新 IP:\n$current_ip\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+            local message="[网络] IP 变动\n旧 IP:\n$old_ip\n新 IP:\n$current_ip\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
             send_telegram "$message"
             send_dingtalk "$message"
             echo "$current_ip" > "$ip_file"
@@ -399,7 +426,7 @@ monitor_network() {
     if [[ "$ENABLE_NETWORK_MONITOR" -eq 1 ]]; then
         local ping_result=$(ping -c 3 -W 2 8.8.8.8 2>/dev/null)
         if [[ $? -ne 0 ]]; then
-            local message="🌐 网络连接失败\n目标: 8.8.8.8\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+            local message="[网络] 网络连接失败\n目标: 8.8.8.8\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
             send_telegram "$message"
             send_dingtalk "$message"
             log "Network connectivity failed: $ping_result"
@@ -411,7 +438,7 @@ monitor_network() {
 send_boot_notification() {
     local hostname=$(hostname)
     local ip_info=$(get_ip)
-    local message="✅ VPS 已上线\n备注: $REMARK\n主机名: $hostname\n公网IP:\n$ip_info\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+    local message="[成功] VPS 已上线\n备注: $REMARK\n主机名: $hostname\n公网IP:\n$ip_info\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
     send_telegram "$message"
     send_dingtalk "$message"
     log "Boot notification sent"
@@ -421,7 +448,7 @@ send_boot_notification() {
 send_ssh_notification() {
     local user="$1"
     local ip="$2"
-    local message="🔐 SSH 登录\n用户: $user\n来源 IP: $ip\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+    local message="[登录] SSH 登录\n用户: $user\n来源 IP: $ip\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
     send_telegram "$message"
     send_dingtalk "$message"
     log "SSH login notification sent: $user from $ip"
@@ -481,8 +508,7 @@ guided_config() {
                     for chat_id in ${TG_CHAT_IDS//,/ }; do
                         local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                             --data-urlencode "chat_id=${chat_id}" \
-                            --data-urlencode "text=${test_message}" \
-                            --data-urlencode "parse_mode=HTML")
+                            --data-urlencode "text=${test_message}")
                         if echo "$response" | grep -q '"ok":true'; then
                             valid_ids+="$chat_id,"
                         else
@@ -498,10 +524,15 @@ guided_config() {
                     fi
                 fi
             done
+            while true; do
+                read -p "启用 Telegram 调试模式？(1=是, 0=否): " DEBUG_TG
+                validate_input yes_no "$DEBUG_TG" && break
+            done
         fi
     else
         TG_BOT_TOKEN=""
         TG_CHAT_IDS=""
+        DEBUG_TG=0
     fi
 
     # DingTalk
@@ -668,19 +699,19 @@ test_notifications() {
                 echo -e "${GREEN}SSH 登录通知已发送${NC}"
                 ;;
             3)
-                local message="⚠️ 测试资源警报\n内存使用率: 85%\nCPU 使用率: 90%\n磁盘使用率: 95%\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                local message="[警告] 测试资源警报\n内存使用率: 85%\nCPU 使用率: 90%\n磁盘使用率: 95%\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
                 send_telegram "$message"
                 send_dingtalk "$message"
                 echo -e "${GREEN}资源警报已发送${NC}"
                 ;;
             4)
-                local message="🌐 测试 IP 变动\n旧 IP:\nIPv4: 192.168.1.1\n新 IP:\n$(get_ip)\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                local message="[网络] 测试 IP 变动\n旧 IP:\nIPv4: 192.168.1.1\n新 IP:\n$(get_ip)\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
                 send_telegram "$message"
                 send_dingtalk "$message"
                 echo -e "${GREEN}IP 变动通知已发送${NC}"
                 ;;
             5)
-                local message="🌐 测试网络连接失败\n目标: 8.8.8.8\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                local message="[网络] 测试网络连接失败\n目标: 8.8.8.8\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
                 send_telegram "$message"
                 send_dingtalk "$message"
                 echo -e "${GREEN}网络连接通知已发送${NC}"
@@ -744,13 +775,14 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e cooling
-        echo -e "版本: 3.0.5\n"
+        echo -e "${GREEN}║       Version: 3.0.6              ║${NC}"
+        echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
         echo -e "Telegram Bot Token: $tg_token_display"
         echo -e "Telegram 通知: ${ENABLE_TG_NOTIFY:-0} (1=Y, 0=N)"
         echo -e "Telegram Chat IDs: ${TG_CHAT_IDS:-未设置}"
+        echo -e "Telegram 调试模式: ${DEBUG_TG:-0} (1=Y, 0=N)"
         echo -e "DingTalk Webhook: $dt_webhook_display"
         echo -e "DingTalk 通知: ${ENABLE_DINGTALK_NOTIFY:-0} (1=Y, 0=N)"
         echo -e "DingTalk Secret: $dt_secret_display"
