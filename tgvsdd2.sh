@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0
+# VPS Notify Script (tgvsdd2.sh) v3.0.1
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0 (2025-05-17)
+# Version: 3.0.1 (2025-05-17)
 # Changelog:
+# - v3.0.1: Fixed Telegram config bug (validate_telegram required TG_CHAT_IDS), optimized guided_config
 # - v3.0: Fixed Telegram newline bug, restored v2.2 guided install, added network monitoring and alert interval
 # - v2.9.1: Restored v2.2 interactive UI with framed menu and config overview
 # - v2.9: Enhanced colored menu, added TERM compatibility check
@@ -120,7 +121,7 @@ EOL
 
 # Validate Telegram configuration
 validate_telegram() {
-    if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
+    if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" ]]; then
         local response=$(curl -s -m 5 "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe")
         if echo "$response" | grep -q '"ok":true'; then
             echo -e "${GREEN}Telegram Bot 验证成功${NC}"
@@ -285,7 +286,7 @@ get_ip() {
     done
     # Try multiple services for IPv6
     for service in "ip.sb" "ifconfig.me" "ipinfo.io/ip"; do
-        ipv6=$(curl -s -m 3 -6 "https://$service")
+        ipv6=$(curl -s -m 3 -6 "https://$的可
         if [[ -n "$ipv6" && "$ipv6" =~ ^[0-9a-fA-F:]+$ ]]; then
             break
         fi
@@ -421,18 +422,55 @@ guided_config() {
         validate_input yes_no "$ENABLE_TG_NOTIFY" && break
     done
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 ]]; then
-        while true; do
+        local max_attempts=5
+        local attempt=1
+        while [[ $attempt -le $max_attempts ]]; do
             read -p "请输入 Telegram Bot Token: " TG_BOT_TOKEN
             if [[ -n "$TG_BOT_TOKEN" ]]; then
-                validate_telegram && break
+                if validate_telegram; then
+                    break
+                else
+                    ((attempt++))
+                    if [[ $attempt -le $max_attempts ]]; then
+                        echo -e "${YELLOW}请重试（剩余 $((max_attempts - attempt + 1)) 次）${NC}"
+                    else
+                        echo -e "${RED}达到最大尝试次数，跳过 Telegram 配置${NC}"
+                        ENABLE_TG_NOTIFY=0
+                        TG_BOT_TOKEN=""
+                        break
+                    fi
+                fi
             else
                 echo -e "${RED}错误：Token 不能为空${NC}"
             fi
         done
-        while true; do
-            read -p "请输入 Telegram Chat IDs (逗号分隔): " TG_CHAT_IDS
-            validate_input chat_ids "$TG_CHAT_IDS" && break
-        done
+        if [[ "$ENABLE_TG_NOTIFY" -eq 1 ]]; then
+            while true; do
+                read -p "请输入 Telegram Chat IDs (逗号分隔): " TG_CHAT_IDS
+                if validate_input chat_ids "$TG_CHAT_IDS"; then
+                    # Test Chat IDs by sending a message
+                    local test_message="VPS 测试消息"
+                    local valid_ids=""
+                    for chat_id in ${TG_CHAT_IDS//,/ }; do
+                        local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                            --data-urlencode "chat_id=${chat_id}" \
+                            --data-urlencode "text=${test_message}")
+                        if echo "$response" | grep -q '"ok":true'; then
+                            valid_ids+="$chat_id,"
+                        else
+                            log "ERROR: Invalid Chat ID $chat_id: $response"
+                            echo -e "${YELLOW}警告：Chat ID $chat_id 无效，已跳过${NC}"
+                        fi
+                    done
+                    if [[ -n "$valid_ids" ]]; then
+                        TG_CHAT_IDS="${valid_ids%,}"
+                        break
+                    else
+                        echo -e "${RED}错误：所有 Chat IDs 均无效，请重新输入${NC}"
+                    fi
+                fi
+            done
+        fi
     else
         TG_BOT_TOKEN=""
         TG_CHAT_IDS=""
@@ -448,7 +486,11 @@ guided_config() {
             read -p "请输入 DingTalk Webhook: " DINGTALK_WEBHOOK
             if [[ -n "$DINGTALK_WEBHOOK" ]]; then
                 read -p "请输入 DingTalk Secret (留空禁用加签): " DINGTALK_SECRET
-                validate_dingtalk "$DINGTALK_WEBHOOK" "$DINGTALK_SECRET" && break
+                if validate_dingtalk "$DINGTALK_WEBHOOK" "$DINGTALK_SECRET"; then
+                    break
+                else
+                    echo -e "${YELLOW}请重试${NC}"
+                fi
             else
                 echo -e "${RED}错误：Webhook 不能为空${NC}"
             fi
@@ -675,7 +717,7 @@ main_menu() {
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
-        echo -e "版本: 3.0\n"
+        echo -e "版本: 3.0.1\n"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
         echo -e "Telegram Bot Token: $tg_token_display"
