@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.9
+# VPS Notify Script (tgvsdd2.sh) v3.0.10
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.9 (2025-05-17)
+# Version: 3.0.10 (2025-05-17)
 # Changelog:
+# - v3.0.10: Fixed sed error in escape_markdown (corrected regex for special chars), switched Telegram to parse_mode=MarkdownV2 for reliable \n, enhanced MarkdownV2 escaping (:, `), added curl command logging, added log view in test menu
 # - v3.0.9: Restored v2.8 Telegram push (use -d instead of --data-urlencode, parse_mode=Markdown), fixed \n line break issue, removed DEBUG_TG/TG_EMOJI user prompts (fixed to 1), set default config options to 1 (Enter for yes), added Markdown special character escaping
 # - v3.0.8: Restored v2.2 Telegram settings (use parse_mode=Markdown for \n line breaks), removed TG_PARSE_MODE, retained TG_EMOJI and DEBUG_TG
 # - v3.0.7: Fixed syntax error (line 203, binary operator), removed parse_mode=HTML and <br>, restored emoji (✅, 🔐, ⚠️, 🌐), added TG_EMOJI and TG_PARSE_MODE
@@ -188,7 +189,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+            url="${webhook}×tamp=${timestamp}&sign=${sign}"
         fi
 
         # Send test message (includes keyword "VPS")
@@ -245,11 +246,12 @@ validate_input() {
     return 0
 }
 
-# Escape Markdown special characters
+# Escape MarkdownV2 special characters
 escape_markdown() {
     local text="$1"
-    # Escape Markdown special characters: _, *, [, ], (, ), ~, `, #, +, -, =, |, {, }, ., !
-    echo "$text" | sed 's/[_\*\[\]\(\)\~\`\#\+\-\=\|\{\}\.\!]/\\&/g'
+    # Escape MarkdownV2 special characters: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !, :
+    # Note: \ must be escaped as \\, and other regex chars ([, ], (, ), *, |, .) must be escaped in sed
+    echo "$text" | sed 's/[_\*\\\[\]\\(\\)\\~\\>\\#\\+\\-\\=\\|\\{\\}\\.\\!\\:]/\\&/g'
 }
 
 # Send Telegram notification
@@ -261,7 +263,7 @@ send_telegram() {
         if [[ "$TG_EMOJI" -eq 1 ]]; then
             final_message=$(echo "$message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
         fi
-        # Escape Markdown special characters
+        # Escape MarkdownV2 special characters
         final_message=$(escape_markdown "$final_message")
         if [[ "$DEBUG_TG" -eq 1 ]]; then
             log "DEBUG: Original message: $message"
@@ -269,13 +271,17 @@ send_telegram() {
         fi
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local url="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
-            local response=$(curl -s -m 5 -X POST "$url" \
-                -d "chat_id=${chat_id}" \
-                -d "text=${final_message}" \
-                -d "parse_mode=Markdown")
+            local curl_cmd="curl -s -m 5 -X POST \"$url\" -d \"chat_id=${chat_id}\" -d \"text=${final_message}\" -d \"parse_mode=MarkdownV2\""
+            if [[ "$DEBUG_TG" -eq 1 ]]; then
+                log "DEBUG: Curl command: $curl_cmd"
+            fi
+            local response=$(eval "$curl_cmd")
             local is_ok=$(echo "$response" | grep -o '"ok":true')
             local message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
             local error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
+            if [[ "$DEBUG_TG" -eq 1 ]]; then
+                log "DEBUG: Telegram response: $response"
+            fi
             if [[ -n "$is_ok" && -n "$message_id" ]]; then
                 log "Telegram notification sent to $chat_id (message_id: $message_id): $final_message"
             else
@@ -304,7 +310,7 @@ send_dingtalk() {
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+                url="${webhook}×tamp=${timestamp}&sign=${sign}"
             fi
 
             response=$(curl -s -m 5 -X POST "$url" \
@@ -511,7 +517,7 @@ guided_config() {
                         local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                             -d "chat_id=${chat_id}" \
                             -d "text=${test_message}" \
-                            -d "parse_mode=Markdown")
+                            -d "parse_mode=MarkdownV2")
                         if echo "$response" | grep -q '"ok":true'; then
                             valid_ids+="$chat_id,"
                         else
@@ -688,6 +694,23 @@ configure_settings() {
     guided_config
 }
 
+# View logs
+view_logs() {
+    echo -e "\n${BLUE}最近 10 条日志:${NC}"
+    tail -n 10 "$LOG_FILE"
+    echo -e "\n${YELLOW}按 q 退出，或输入行数查看更多日志:${NC}"
+    read -p "行数 (默认 10): " lines
+    if [[ "$lines" == "q" ]]; then
+        return
+    fi
+    lines=${lines:-10}
+    if [[ "$lines" =~ ^[0-9]+$ ]]; then
+        tail -n "$lines" "$LOG_FILE"
+    else
+        echo -e "${RED}错误：请输入有效数字${NC}"
+    fi
+}
+
 # Test notifications
 test_notifications() {
     load_config
@@ -698,6 +721,7 @@ test_notifications() {
         echo -e "${GREEN}3.${NC} 测试资源警报"
         echo -e "${GREEN}4.${NC} 测试 IP 变动通知"
         echo -e "${GREEN}5.${NC} 测试网络连接通知"
+        echo -e "${GREEN}6.${NC} 查看日志"
         echo -e "${GREEN}0.${NC} 返回主菜单"
         read -p "请选择: " choice
         case $choice in
@@ -726,6 +750,9 @@ test_notifications() {
                 send_telegram "$message"
                 send_dingtalk "$message"
                 echo -e "${GREEN}网络连接通知已发送${NC}"
+                ;;
+            6)
+                view_logs
                 ;;
             0)
                 return
@@ -786,7 +813,7 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}║       Version: 3.0.9              ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.10             ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
