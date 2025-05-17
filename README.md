@@ -1,6 +1,6 @@
 VPS Notify (tgvsdd2.sh)
 
-tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 和 DingTalk 通知，帮助用户实时监控 VPS 的 IP 变动、SSH 登录、系统资源使用情况以及开机状态。相比早期版本（tgvsdd1.sh），本脚本增加了多渠道通知、交互式菜单、自动化安装和更健壮的错误处理，适合 Linux VPS（Debian/Ubuntu/CentOS 等）。
+tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 和 DingTalk 通知，帮助用户实时监控 VPS 的 IP 变动、SSH 登录、系统资源使用情况以及开机状态。相比早期版本（tgvsdd1.sh），本脚本增加了多渠道通知、交互式菜单、自动化安装、更新功能和更健壮的错误处理，适合 Linux VPS（Debian/Ubuntu/CentOS 等）。
 功能特性
 
 多渠道通知：
@@ -19,7 +19,7 @@ tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 
 
 
 交互式菜单：
-用户友好的彩色界面，支持安装、配置、测试通知、检查状态和卸载。
+用户友好的彩色界面，支持安装、配置、测试通知、检查状态、卸载和更新脚本。
 
 
 自动化安装：
@@ -36,6 +36,10 @@ tgvsdd2.sh 是一个功能强大的 VPS 监控和通知脚本，支持 Telegram 
 灵活配置：
 通过 /etc/vps_notify.conf 管理配置，支持动态修改。
 支持自定义主机备注（REMARK）。
+
+
+脚本更新：
+支持从 GitHub 自动下载最新版本，保留现有配置和服务。
 
 
 
@@ -79,6 +83,7 @@ curl -o tgvsdd2.sh -fsSL https://raw.githubusercontent.com/meiloi/scripts/main/t
 3. 测试通知：发送测试通知（开机、SSH、资源、IP 变动）。
 4. 检查系统状态：查看服务、cron 和日志状态。
 5. 卸载：删除脚本和所有相关文件。
+6. 更新脚本：从 GitHub 下载最新版本，保留配置和服务。
 0. 退出：退出脚本。
 
 命令行模式
@@ -115,8 +120,17 @@ Telegram：
 
 
 DingTalk：
-在钉钉群组中添加自定义机器人，获取 DINGTALK_WEBHOOK。
-复制 Webhook URL（如 https://oapi.dingtalk.com/robot/send?access_token=xxx）。
+打开钉钉群组，进入“群设置” > “智能群助手” > “自定义机器人”。
+点击“添加机器人”，选择“自定义机器人”。
+输入机器人名称（例如“VPS Notify”）。
+选择安全设置：
+推荐“自定义关键词”（输入关键词如“VPS”或“通知”）。
+避免“加签”以简化配置，除非必要。
+可选“IP 地址”白名单，需添加 VPS 的公网 IP（运行 curl -s4m 3 ip.sb 获取）。
+
+
+点击“完成”，复制 Webhook URL（格式如 https://oapi.dingtalk.com/robot/send?access_token=xxx）。
+如果 Webhook 失效（例如错误 300005），删除机器人并重新创建。
 
 
 
@@ -128,9 +142,35 @@ DingTalk：
 
 
 通知失败：
-检查 /var/log/vps_notify.log 中的错误信息。
-验证 Telegram/DingTalk 配置（Token、Chat ID、Webhook）。
-确保 VPS 可以访问 api.telegram.org 和 oapi.dingtalk.com。
+检查 /var/log/vps_notify.log 中的错误信息：cat /var/log/vps_notify.log | grep ERROR
+
+
+Telegram：
+验证 Token 和 Chat ID 是否正确。
+确保 VPS 可以访问 api.telegram.org：curl -I https://api.telegram.org
+
+
+
+
+DingTalk：
+验证 Webhook 是否有效：curl -s -X POST "https://oapi.dingtalk.com/robot/send?access_token=<你的token>" \
+    -H "Content-Type: application/json" \
+    -d '{"msgtype": "text", "text": {"content": "测试消息"}}'
+
+
+常见错误码：
+300005：token is not exist - Webhook 失效或 token 错误。重新生成 Webhook（见“获取 DingTalk 配置”）。
+400：无效的 access_token - 检查 Webhook URL 是否完整。
+403：IP 不在白名单 - 在钉钉后台添加 VPS IP 或禁用 IP 限制。
+310000：消息内容为空或格式错误 - 确保消息包含 content 字段。
+42001：access_token 过期 - 重新生成 Webhook。
+
+
+确保 VPS 可以访问 oapi.dingtalk.com：curl -I https://oapi.dingtalk.com
+
+
+
+
 
 
 依赖缺失：
@@ -146,6 +186,15 @@ IP 获取失败：
 确保 VPS 支持 IPv4/IPv6（视需求）。
 
 
+更新脚本失败：
+检查 GitHub 连通性：curl -I https://raw.githubusercontent.com/meiloi/scripts/main/tgvsdd2.sh
+
+
+查看日志：cat /var/log/vps_notify.log | grep update
+
+
+
+
 其他问题：
 提交 issue 到 GitHub 仓库（meiloi/scripts）。
 提供日志输出和错误信息。
@@ -157,6 +206,7 @@ IP 获取失败：
 [2025-05-17 08:00:00] Installation completed
 [2025-05-17 08:05:00] Sent boot notification
 [2025-05-17 08:10:00] IP changed from 192.168.1.1 to 192.168.1.2
+[2025-05-17 09:00:00] ERROR: Invalid DingTalk webhook: {"errcode":300005,"errmsg":"token is not exist"}
 
 贡献
 欢迎提交 Pull Request 或 Issue 来改进脚本！请遵循以下步骤：
@@ -166,6 +216,19 @@ Fork 仓库。
 提交更改（git commit -m "Add xxx feature"）。
 推送分支（git push origin feature/xxx）。
 创建 Pull Request。
+
+变更日志
+
+v2.1 (2025-05-17)：
+新增“更新脚本”功能（菜单选项 6），支持从 GitHub 自动下载最新版本。
+增强钉钉通知错误处理，添加重试机制和详细日志。
+更新 README，补充钉钉 Webhook 配置和常见错误码（例如 300005）。
+
+
+v2.0：
+初始优化版本，修复 get_ip 语法错误，添加交互式菜单和多渠道通知。
+
+
 
 许可
 本项目采用 MIT 许可证。使用时请遵守相关法律法规，脚本仅限学习和个人使用。
