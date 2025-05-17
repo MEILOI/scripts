@@ -1,19 +1,23 @@
 #!/bin/bash
 
 # VPS Notification Script (Advanced Optimized Version)
+# Version: 2.1
 # Changes:
-# - Enhanced send_dingtalk function with better error handling, message cleanup, and retry mechanism
+# - Added update_script function and menu option 6 for updating from GitHub
+# - Enhanced send_dingtalk with retry mechanism and better error handling
 # - Fixed syntax error in get_ip function (missing ) and incorrect URL 'three')
 # - Corrected typos: unload_script -> uninstall_script, menu text
 # - Verified all control structures for proper closure
 # - Includes Telegram/DingTalk notifications, disk monitoring, logging, status checks
 
+SCRIPT_VERSION="2.1"
 CONFIG_FILE="/etc/vps_notify.conf"
 SCRIPT_PATH="/usr/local/bin/vps_notify.sh"
 SERVICE_PATH="/etc/systemd/system/vps_notify.service"
 CRON_JOB="*/5 * * * * root /usr/local/bin/vps_notify.sh monitor >/dev/null 2>&1"
 IP_FILE="/var/lib/vps_notify_ip.txt"
 LOG_FILE="/var/log/vps_notify.log"
+GITHUB_URL="https://raw.githubusercontent.com/meiloi/scripts/main/tgvsdd2.sh"
 
 TG_API="https://api.telegram.org/bot"
 DINGTALK_API="https://oapi.dingtalk.com/robot/send?access_token="
@@ -103,6 +107,8 @@ validate_tg() {
 validate_dingtalk() {
     local webhook="$1"
     if [ -z "$webhook" ]; then
+        echo -e "${RED}错误: DingTalk Webhook 为空${NC}"
+        log_message "ERROR: DingTalk webhook is empty"
         return 1
     fi
     response=$(curl -s -m 5 -X POST "${DINGTALK_API}${webhook}" \
@@ -111,6 +117,7 @@ validate_dingtalk() {
     if echo "$response" | grep -q '"errcode":0'; then
         return 0
     else
+        echo -e "${RED}DingTalk Webhook 验证失败，请检查:${NC} $response"
         log_message "ERROR: Invalid DingTalk webhook: $response"
         return 1
     fi
@@ -191,7 +198,6 @@ send_notification() {
     [ "$ENABLE_DINGTALK_NOTIFY" = "Y" ] && send_dingtalk "$message"
 }
 
-# 以下函数保持不变（为节省空间，仅列出关键部分，完整脚本与之前一致）
 # VPS 上线通知
 notify_boot() {
     ip_info=$(get_ip)
@@ -264,6 +270,7 @@ check_status() {
     print_menu_header
     echo -e "${CYAN}[状态检查]${NC} 检查通知系统状态:\n"
     
+    echo -e "${BLUE}脚本版本:${NC} $SCRIPT_VERSION"
     if systemctl is-active vps_notify.service >/dev/null 2>&1; then
         echo -e "${GREEN}✓ systemd 服务 (vps_notify.service): 运行中${NC}"
     else
@@ -294,6 +301,7 @@ print_menu_header() {
     echo -e "${CYAN}════════════════════════════════════════${NC}"
     echo -e "${CYAN}║       ${YELLOW}VPS 通知系統 (高級版)       ${CYAN}║${NC}"
     echo -e "${CYAN}════════════════════════════════════════${NC}"
+    echo -e "${BLUE}版本: $SCRIPT_VERSION${NC}"
     echo ""
 }
 
@@ -350,6 +358,73 @@ show_config() {
         echo -e "${RED}未找到配置文件，请先安装脚本${NC}"
     fi
     echo ""
+}
+
+# 更新脚本
+update_script() {
+    print_menu_header
+    echo -e "${CYAN}[更新脚本]${NC} 当前版本: $SCRIPT_VERSION\n"
+    echo -e "${YELLOW}将从 GitHub 下载最新脚本: $GITHUB_URL${NC}"
+    read -rp "确认更新? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}更新已取消${NC}"
+        log_message "Script update cancelled by user"
+        sleep 2
+        return
+    fi
+
+    # 检查网络连通性
+    if ! curl -s -I -m 5 "$GITHUB_URL" >/dev/null; then
+        echo -e "${RED}错误: 无法访问 GitHub，请检查网络${NC}"
+        log_message "ERROR: Failed to access GitHub for update"
+        sleep 2
+        return 1
+    fi
+
+    # 备份当前脚本
+    local backup_file="$SCRIPT_PATH.bak"
+    if [ -f "$SCRIPT_PATH" ]; then
+        cp "$SCRIPT_PATH" "$backup_file"
+        echo -e "${GREEN}已备份当前脚本到 $backup_file${NC}"
+        log_message "Backed up current script to $backup_file"
+    fi
+
+    # 下载新脚本
+    local temp_file="/tmp/vps_notify_temp.sh"
+    if ! curl -s -m 10 -o "$temp_file" "$GITHUB_URL"; then
+        echo -e "${RED}错误: 下载脚本失败${NC}"
+        log_message "ERROR: Failed to download new script"
+        sleep 2
+        return 1
+    fi
+
+    # 验证新脚本
+    if ! bash -n "$temp_file"; then
+        echo -e "${RED}错误: 下载的脚本语法错误，更新中止${NC}"
+        log_message "ERROR: Downloaded script has syntax errors"
+        rm -f "$temp_file"
+        sleep 2
+        return 1
+    fi
+
+    # 替换脚本
+    mv "$temp_file" "$SCRIPT_PATH"
+    chmod +x "$SCRIPT_PATH"
+    echo -e "${GREEN}脚本已更新到最新版本${NC}"
+    log_message "Script updated to latest version from $GITHUB_URL"
+
+    # 验证更新
+    if [ -f "$SCRIPT_PATH" ] && grep -q "SCRIPT_VERSION" "$SCRIPT_PATH"; then
+        new_version=$(grep "SCRIPT_VERSION=" "$SCRIPT_PATH" | cut -d'"' -f2)
+        echo -e "${GREEN}新版本: $new_version${NC}"
+        log_message "New script version: $new_version"
+    else
+        echo -e "${YELLOW}警告: 无法确认新版本号${NC}"
+        log_message "WARNING: Could not confirm new script version"
+    fi
+
+    echo -e "${YELLOW}请重新运行脚本以使用新版本: ./tgvsdd2.sh${NC}"
+    sleep 2
 }
 
 # 安装脚本
@@ -869,9 +944,10 @@ show_menu() {
         echo -e "${CYAN}3.${NC} 测试通知"
         echo -e "${CYAN}4.${NC} 检查系统状态"
         echo -e "${CYAN}5.${NC} 卸载"
+        echo -e "${CYAN}6.${NC} 更新脚本"
         echo -e "${CYAN}0.${NC} 退出"
         echo ""
-        read -rp "请选择 [0-5]: " choice
+        read -rp "请选择 [0-6]: " choice
         
         case $choice in
             1)
@@ -892,6 +968,9 @@ show_menu() {
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
                     uninstall_script
                 fi
+                ;;
+            6)
+                update_script
                 ;;
             0)
                 echo -e "\n${GREEN}感谢使用 VPS 通知系统!${NC}"
