@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.1
+# VPS Notify Script (tgvsdd2.sh) v3.0.2
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.1 (2025-05-17)
+# Version: 3.0.2 (2025-05-17)
 # Changelog:
+# - v3.0.2: Fixed log undefined error, fixed syntax error in get_ip and monitor_resources, improved compatibility
 # - v3.0.1: Fixed Telegram config bug (validate_telegram required TG_CHAT_IDS), optimized guided_config
 # - v3.0: Fixed Telegram newline bug, restored v2.2 guided install, added network monitoring and alert interval
 # - v2.9.1: Restored v2.2 interactive UI with framed menu and config overview
@@ -21,6 +22,32 @@ LOG_FILE="/var/log/vps_notify.log"
 LOG_MAX_SIZE=$((1024*1024)) # 1MB
 LOG_RETENTION_DAYS=7
 
+# Logging function (defined first to avoid undefined errors)
+log() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $1" >> "$LOG_FILE"
+    # Rotate log if exceeds max size
+    if [[ -f "$LOG_FILE" && $(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE") -gt $LOG_MAX_SIZE ]]; then
+        mv "$LOG_FILE" "${LOG_FILE}.old"
+        touch "$LOG_FILE"
+        echo "[$timestamp] Log rotated due to size limit" >> "$LOG_FILE"
+    fi
+    # Clean up old logs
+    find /var/log -name "vps_notify.log.old" -mtime +$LOG_RETENTION_DAYS -delete 2>/dev/null
+}
+
+# Ensure log file exists
+mkdir -p /var/log
+touch "$LOG_FILE"
+log "Script started"
+
+# Check Bash version
+if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
+    echo "错误：需要 Bash 4.0 或更高版本"
+    log "ERROR: Bash version ${BASH_VERSION} is too old, requires 4.0+"
+    exit 1
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -30,9 +57,10 @@ NC='\033[0m' # No Color
 
 # Check terminal color support
 if [[ "$TERM" != *"color"* ]]; then
-    echo -e "${YELLOW}警告：终端可能不支持颜色显示，建议设置 export TERM=xterm-256color${NC}"
+    echo -e "${YELLOW}警告：终端可能不支持颜色显示，已自动设置为 xterm-256color${NC}"
+    export TERM=xterm-256color
     COLOR_SUPPORT=0
-    log "Warning: TERM=$TERM does not support colors"
+    log "Warning: TERM=$TERM does not support colors, set to xterm-256color"
 else
     COLOR_SUPPORT=1
     log "Color support enabled (TERM=$TERM)"
@@ -50,24 +78,6 @@ check_time_sync() {
     else
         log "Time sync verified"
     fi
-}
-
-# Ensure log file exists
-mkdir -p /var/log
-touch "$LOG_FILE"
-
-# Logging function
-log() {
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] $1" >> "$LOG_FILE"
-    # Rotate log if exceeds max size
-    if [[ -f "$LOG_FILE" && $(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE") -gt $LOG_MAX_SIZE ]]; then
-        mv "$LOG_FILE" "${LOG_FILE}.old"
-        touch "$LOG_FILE"
-        log "Log rotated due to size limit"
-    fi
-    # Clean up old logs
-    find /var/log -name "vps_notify.log.old" -mtime +$LOG_RETENTION_DAYS -delete
 }
 
 # Load configuration
@@ -125,6 +135,7 @@ validate_telegram() {
         local response=$(curl -s -m 5 "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe")
         if echo "$response" | grep -q '"ok":true'; then
             echo -e "${GREEN}Telegram Bot 验证成功${NC}"
+            log "Telegram validation succeeded"
             return 0
         else
             echo -e "${RED}Telegram Bot 验证失败：无效的 Token${NC}"
@@ -133,6 +144,7 @@ validate_telegram() {
         fi
     else
         echo -e "${YELLOW}Telegram 配置不完整或未启用${NC}"
+        log "Telegram config incomplete or disabled"
         return 1
     fi
 }
@@ -157,7 +169,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}×tamp=${timestamp}&sign=${sign}"
+            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
         fi
 
         # Send test message (includes keyword "VPS")
@@ -249,7 +261,7 @@ send_dingtalk() {
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${DINGTALK_WEBHOOK}×tamp=${timestamp}&sign=${sign}"
+                url="${webhook}&timestamp=${timestamp}&sign=${sign}"
             fi
 
             response=$(curl -s -m 5 -X POST "$url" \
@@ -286,7 +298,7 @@ get_ip() {
     done
     # Try multiple services for IPv6
     for service in "ip.sb" "ifconfig.me" "ipinfo.io/ip"; do
-        ipv6=$(curl -s -m 3 -6 "https://$的可
+        ipv6=$(curl -s -m 3 -6 "https://$service")
         if [[ -n "$ipv6" && "$ipv6" =~ ^[0-9a-fA-F:]+$ ]]; then
             break
         fi
@@ -319,7 +331,7 @@ monitor_resources() {
         local used=$(echo "$mem_info" | awk '{print $3}')
         local usage=$((100 * used / total))
         if [[ $usage -ge $MEM_THRESHOLD ]]; then
-            message+="内存使用率: ${usage}% (超过阈值 ${MEM_THRESHOLD}%)\n"
+            message+="内存使用率: ${usage}% 超过阈值 ${MEM_THRESHOLD}%\n"
         fi
     fi
 
@@ -328,7 +340,7 @@ monitor_resources() {
         local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}')
         local usage=$(printf "%.0f" "$cpu_usage")
         if [[ $usage -ge $CPU_THRESHOLD ]]; then
-            message+="CPU 使用率: ${usage}% (超过阈值 ${CPU_THRESHOLD}%)\n"
+            message+="CPU 使用率: ${usage}% 超过阈值 ${CPU_THRESHOLD}%\n"
         fi
     fi
 
@@ -336,7 +348,7 @@ monitor_resources() {
     if [[ "$ENABLE_DISK_MONITOR" -eq 1 ]]; then
         local disk_usage=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
         if [[ $disk_usage -ge $DISK_THRESHOLD ]]; then
-            message+="磁盘使用率: ${disk_usage}% (超过阈值 ${DISK_THRESHOLD}%)\n"
+            message+="磁盘使用率: ${disk_usage}% 超过阈值 ${DISK_THRESHOLD}%\n"
         fi
     fi
 
@@ -717,7 +729,7 @@ main_menu() {
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
-        echo -e "版本: 3.0.1\n"
+        echo -e "版本: 3.0.2\n"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
         echo -e "Telegram Bot Token: $tg_token_display"
@@ -727,7 +739,6 @@ main_menu() {
         echo -e "DingTalk 通知: ${ENABLE_DINGTALK_NOTIFY:-0} (1=Y, 0=N)"
         echo -e "DingTalk Secret: $dt_secret_display"
         echo -e "备注: ${REMARK:-未设置}"
-        echo -e "SSH登录通知: ${ENABLE_SSH_NOTIFY:-1} (1=Y, 0=N)"
         echo -e "内存监控: ${ENABLE_MEM_MONITOR:-1} (阈值: ${MEM_THRESHOLD:-80}%)"
         echo -e "CPU监控: ${ENABLE_CPU_MONITOR:-1} (阈值: ${CPU_THRESHOLD:-80}%)"
         echo -e "磁盘监控: ${ENABLE_DISK_MONITOR:-1} (阈值: ${DISK_THRESHOLD:-80}%)"
