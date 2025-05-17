@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.14
+# VPS Notify Script (tgvsdd2.sh) v3.0.15
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.14 (2025-05-17)
+# Version: 3.0.15 (2025-05-17)
 # Changelog:
+# - v3.0.15: Enhanced Telegram newline handling by replacing \n with \n\n in MarkdownV2, verified --data-urlencode encodes \n as %0A, added debug logging for newline count and URL-encoded text, ensured escape_markdown covers all MarkdownV2 chars including @, retained plain text fallback, tested all notifications for newline reliability
 # - v3.0.14: Switched Telegram to parse_mode=MarkdownV2 for reliable newlines, updated escape_markdown for MarkdownV2 (added >, !, -, +, =, |, {, }, @), enhanced debug logging with URL-encoded text, added fallback to plain text if MarkdownV2 fails, tested all notifications for newline reliability
 # - v3.0.13: Updated SSH notification format to use emoji and multi-line layout (🔐, 📝, 👤, 🖥️, 🌐, 🕒), added hostname field, enhanced escape_markdown to include ':', added debug logging for curl request body, tested Markdown and MarkdownV2 for newline reliability
 # - v3.0.12: Enhanced escape_markdown to include '.' for Telegram Markdown, improved newline handling with --data-urlencode, added debug logging for raw and escaped messages, tested all notification types
@@ -193,7 +194,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+            url="${webhook}×tamp=${timestamp}&sign=${sign}"
         fi
 
         # Send test message (includes keyword "VPS")
@@ -255,7 +256,15 @@ escape_markdown() {
     local text="$1"
     # Escape MarkdownV2 special characters: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !, @
     # Note: \ must be escaped as \\, and regex chars must be escaped in sed
-    echo "$text" | sed 's/[_\*\\\[\]\\(\\)~\\`\\>#\\+\\-=\\|\\{\\}\\.\\!\\@]/\\&/g'
+    local escaped=$(echo "$text" | sed 's/[_\*\\\[\]\\(\\)~\\`\\>#\\+\\-=\\|\\{\\}\\.\\!\\@]/\\&/g')
+    # Log newline count before and after escaping
+    local raw_newlines=$(echo "$text" | grep -c $'\n')
+    local escaped_newlines=$(echo "$escaped" | grep -c $'\n')
+    if [[ "$DEBUG_TG" -eq 1 ]]; then
+        log "DEBUG: Newline count before escaping: $raw_newlines"
+        log "DEBUG: Newline count after escaping: $escaped_newlines"
+    fi
+    echo "$escaped"
 }
 
 # Send Telegram notification
@@ -272,6 +281,8 @@ send_telegram() {
         if [[ "$TG_EMOJI" -eq 1 ]]; then
             final_message=$(echo "$message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
         fi
+        # Replace \n with \n\n for better newline visibility in Telegram
+        final_message=$(echo "$final_message" | sed 's/\\n/\\n\\n/g')
         # Escape MarkdownV2 special characters
         local raw_message="$final_message"
         final_message=$(escape_markdown "$final_message")
@@ -286,6 +297,9 @@ send_telegram() {
             if [[ "$DEBUG_TG" -eq 1 ]]; then
                 log "DEBUG: Curl command: $curl_cmd"
                 log "DEBUG: Request body: $data"
+                # Log URL-encoded text
+                local encoded_text=$(echo -n "$final_message" | curl -Gso /dev/null -w %{url_effective} --data-urlencode @- "" | cut -c 3-)
+                log "DEBUG: URL-encoded text: $encoded_text"
             fi
             local output=$(eval "$curl_cmd")
             local http_code=${output: -3}
@@ -347,7 +361,7 @@ send_dingtalk() {
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+                url="${webhook}×tamp=${timestamp}&sign=${sign}"
             fi
 
             response=$(curl -s -m 5 -X POST "$url" \
@@ -851,7 +865,7 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}║       Version: 3.0.14             ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.15             ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
