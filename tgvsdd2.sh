@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.12
+# VPS Notify Script (tgvsdd2.sh) v3.0.13
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.12 (2025-05-17)
+# Version: 3.0.13 (2025-05-17)
 # Changelog:
+# - v3.0.13: Updated SSH notification format to use emoji and multi-line layout (🔐, 📝, 👤, 🖥️, 🌐, 🕒), added hostname field, enhanced escape_markdown to include ':', added debug logging for curl request body, tested Markdown and MarkdownV2 for newline reliability
 # - v3.0.12: Enhanced escape_markdown to include '.' for Telegram Markdown, improved newline handling with --data-urlencode, added debug logging for raw and escaped messages, tested all notification types
 # - v3.0.11: Reverted Telegram to parse_mode=Markdown (from MarkdownV2) to fix notification failures, simplified escape_markdown for Markdown (escape _, *, [, ], (, ), `, #), added HTTP status code logging, validated TG_BOT_TOKEN/TG_CHAT_IDS in send_telegram
 # - v3.0.10: Fixed sed error in escape_markdown (corrected regex for special chars), switched Telegram to parse_mode=MarkdownV2 for reliable \n, enhanced MarkdownV2 escaping (:, `), added curl command logging, added log view in test menu
@@ -191,7 +192,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+            url="${webhook}×tamp=${timestamp}&sign=${sign}"
         fi
 
         # Send test message (includes keyword "VPS")
@@ -251,9 +252,9 @@ validate_input() {
 # Escape Markdown special characters
 escape_markdown() {
     local text="$1"
-    # Escape Markdown special characters: _, *, [, ], (, ), `, #, .
-    # Note: \ must be escaped as \\, and regex chars ([, ], (, ), *, .) must be escaped in sed
-    echo "$text" | sed 's/[_\*\\\[\]\\(\\)\\`\\#\\.]/\\&/g'
+    # Escape Markdown special characters: _, *, [, ], (, ), `, #, ., :
+    # Note: \ must be escaped as \\, and regex chars ([, ], (, ), *, ., :) must be escaped in sed
+    echo "$text" | sed 's/[_\*\\\[\]\\(\\)\\`\\#\\\.\\:]/\\&/g'
 }
 
 # Send Telegram notification
@@ -279,9 +280,11 @@ send_telegram() {
         fi
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local url="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
+            local data="chat_id=${chat_id}&text=${final_message}&parse_mode=Markdown"
             local curl_cmd="curl -s -m 5 -w '%{http_code}' -X POST \"$url\" --data-urlencode \"chat_id=${chat_id}\" --data-urlencode \"text=${final_message}\" --data-urlencode \"parse_mode=Markdown\""
             if [[ "$DEBUG_TG" -eq 1 ]]; then
                 log "DEBUG: Curl command: $curl_cmd"
+                log "DEBUG: Request body: $data"
             fi
             local output=$(eval "$curl_cmd")
             local http_code=${output: -3}
@@ -297,6 +300,26 @@ send_telegram() {
                 log "Telegram notification sent to $chat_id (message_id: $message_id): $final_message"
             else
                 log "ERROR: Failed to send Telegram message to $chat_id (HTTP $http_code): $response (Description: $error_desc)"
+                # Fallback to plain text if Markdown fails
+                if [[ "$http_code" != "200" || -n "$error_desc" ]]; then
+                    log "Attempting fallback to plain text"
+                    final_message="$raw_message"
+                    curl_cmd="curl -s -m 5 -w '%{http_code}' -X POST \"$url\" --data-urlencode \"chat_id=${chat_id}\" --data-urlencode \"text=${final_message}\""
+                    if [[ "$DEBUG_TG" -eq 1 ]]; then
+                        log "DEBUG: Fallback curl command: $curl_cmd"
+                    fi
+                    output=$(eval "$curl_cmd")
+                    http_code=${output: -3}
+                    response=${output%???}
+                    is_ok=$(echo "$response" | grep -o '"ok":true')
+                    message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
+                    error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
+                    if [[ -n "$is_ok" && -n "$message_id" && "$http_code" == "200" ]]; then
+                        log "Telegram fallback notification sent to $chat_id (message_id: $message_id): $final_message"
+                    else
+                        log "ERROR: Fallback failed for $chat_id (HTTP $http_code): $response (Description: $error_desc)"
+                    fi
+                fi
             fi
         done
     else
@@ -323,7 +346,7 @@ send_dingtalk() {
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+                url="${webhook}×tamp=${timestamp}&sign=${sign}"
             fi
 
             response=$(curl -s -m 5 -X POST "$url" \
@@ -468,7 +491,8 @@ send_boot_notification() {
 send_ssh_notification() {
     local user="$1"
     local ip="$2"
-    local message="[登录] SSH 登录\n用户: $user\n来源 IP: $ip\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+    local hostname=$(hostname)
+    local message="🔐 SSH 登錄通知\n📝 備註: $REMARK\n👤 用戶: $user\n🖥️ 主機: $hostname\n🌐 來源 IP: $ip\n🕒 時間: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
     send_telegram "$message"
     send_dingtalk "$message"
     log "SSH login notification sent: $user from $ip"
@@ -826,7 +850,7 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}║       Version: 3.0.12             ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.13             ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
