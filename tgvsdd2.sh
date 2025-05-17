@@ -133,7 +133,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}×tamp=${timestamp}&sign=${sign}"
+            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
         fi
         response=$(curl -s -m 5 -X POST "$url" \
             -H "Content-Type: application/json" \
@@ -167,7 +167,7 @@ send_telegram() {
         # Replace tags with Emoji
         final_message=$(echo "$final_message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
         # Escape MarkdownV2 special characters
-        final_message=$(echo "$final_message" | sed 's/[-!.+*#\[\]()>{}|=:%@]/\\&/g')
+        final_message=$(echo "$final_message" | sed 's/[._~()\[\]{}<>#+-|=*!\\]/\\&/g')
         log "Telegram message before sending: $final_message"
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
@@ -198,8 +198,8 @@ send_dingtalk() {
             local url="$DINGTALK_WEBHOOK"
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
-                sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-                url="${webhook}×tamp=${timestamp}&sign=${sign}"
+                sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
+                url="${DINGTALK_WEBHOOK}&timestamp=${timestamp}&sign=${sign}"
             fi
             response=$(curl -s -m 5 -X POST "$url" \
                 -H "Content-Type: application/json" \
