@@ -1,10 +1,13 @@
+```bash
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.18
+# VPS Notify Script (tgvsdd2.sh) v3.0.20
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.18 (2025-05-17)
+# Version: 3.0.20 (2025-05-17)
 # Changelog:
+# - v3.0.20: Fixed Telegram newline issue by switching to JSON format for send_telegram, added \n\n for paragraph breaks, expanded escape_markdown to include | and ., enhanced debug logging with API response details
+# - v3.0.19: Fixed Telegram newline issue by using --data-urlencode for all parameters, improved escape_markdown for Markdown, added debug logging for Telegram message sending, retained Markdown parse_mode
 # - v3.0.18: Switch to Markdown (from MarkdownV2), fix line breaks using real newline characters, improve escape_markdown function, update menu version display
 # - v3.0.15: Enhanced Telegram newline handling by replacing \n with \n\n in MarkdownV2, verified --data-urlencode encodes \n as %0A, added debug logging for newline count and URL-encoded text, ensured escape_markdown covers all MarkdownV2 chars including @, retained plain text fallback, tested all notifications for newline reliability
 # - v3.0.14: Switched Telegram to parse_mode=MarkdownV2 for reliable newlines, updated escape_markdown for MarkdownV2 (added >, !, -, +, =, |, {, }, @), enhanced debug logging with URL-encoded text, added fallback to plain text if MarkdownV2 fails, tested all notifications for newline reliability
@@ -255,8 +258,8 @@ validate_input() {
 # Escape Markdown special characters for Markdown
 escape_markdown() {
     local text="$1"
-    # Escape Markdown special characters: _ * [ ] ( ) ` and -
-    local escaped=$(echo "$text" | sed 's/\\([_\\*\\[\\]()`-]\\)/\\\\\\1/g')
+    # Escape Markdown special characters: _ * [ ] ( ) ` # - + | .
+    local escaped=$(echo "$text" | sed 's/\\([_\\*\\[\\]()`#+\\-|.]\\)/\\\\\\1/g')
     echo "$escaped"
 }
 
@@ -268,14 +271,26 @@ send_telegram() {
         if [[ "$TG_EMOJI" -eq 1 ]]; then
             final_message=$(echo "$final_message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
         fi
+        # Replace single \n with \n\n for clearer paragraph breaks
+        final_message=$(echo "$final_message" | sed 's/\\n/\\n\\n/g')
         local raw_message="$final_message"
         final_message=$(escape_markdown "$final_message")
         for chat_id in ${TG_CHAT_IDS//,/ }; do
-            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                --data-urlencode "chat_id=${chat_id}" \
-                --data-urlencode "text=${final_message}" \
-                --data-urlencode "parse_mode=Markdown" > /dev/null
+            local json_payload=$(printf '{"chat_id":"%s","text":"%s","parse_mode":"Markdown"}' "$chat_id" "$final_message")
+            local response=$(curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                -H "Content-Type: application/json" \
+                -d "$json_payload")
+            if [[ "$DEBUG_TG" -eq 1 ]]; then
+                log "Telegram message sent to $chat_id: raw='$raw_message', escaped='$final_message', json='$json_payload', response='$response'"
+            fi
+            if ! echo "$response" | grep -q '"ok":true'; then
+                log "ERROR: Failed to send Telegram message to $chat_id: $response"
+            fi
         done
+    else
+        if [[ "$DEBUG_TG" -eq 1 ]]; then
+            log "Telegram notification skipped: ENABLE_TG_NOTIFY=$ENABLE_TG_NOTIFY, TG_BOT_TOKEN=${TG_BOT_TOKEN:0:10}..., TG_CHAT_IDS=$TG_CHAT_IDS"
+        fi
     fi
 }
 
@@ -297,7 +312,7 @@ send_dingtalk() {
 
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
-                sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
+                sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
                 url="${webhook}×tamp=${timestamp}&sign=${sign}"
             fi
 
@@ -444,7 +459,7 @@ send_ssh_notification() {
     local user="$1"
     local ip="$2"
     local hostname=$(hostname)
-    local message="🔐 SSH 登錄通知\n📝 備註: $REMARK\n👤 用戶: $user\n🖥️ 主機: $hostname\n🌐 來源 IP: $ip\n🕒 時間: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+    local message="🔐 SSH 登录通知\n📝 备注: $REMARK\n👤 用户: $user\n🖥️ 主机: $hostname\n🌐 来源 IP: $ip\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
     send_telegram "$message"
     send_dingtalk "$message"
     log "SSH login notification sent: $user from $ip"
@@ -504,9 +519,8 @@ guided_config() {
                     local valid_ids=""
                     for chat_id in ${TG_CHAT_IDS//,/ }; do
                         local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                            --data-urlencode "chat_id=${chat_id}" \
-                            --data-urlencode "text=${test_message}" \
-                            --data-urlencode "parse_mode=Markdown")
+                            -H "Content-Type: application/json" \
+                            -d "{\"chat_id\":\"${chat_id}\",\"text\":\"${test_message}\",\"parse_mode\":\"Markdown\"}")
                         if echo "$response" | grep -q '"ok":true'; then
                             valid_ids+="$chat_id,"
                         else
@@ -801,8 +815,8 @@ main_menu() {
 
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
-        echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}║       Version: 3.0.18             ║${NC}"
+        echo -e "${GREEN}║       VPS 通知系统 (高级版)       ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.20             ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
@@ -887,3 +901,4 @@ case "$1" in
         main_menu
         ;;
 esac
+```
