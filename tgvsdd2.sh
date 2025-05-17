@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.10
+# VPS Notify Script (tgvsdd2.sh) v3.0.11
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.10 (2025-05-17)
+# Version: 3.0.11 (2025-05-17)
 # Changelog:
+# - v3.0.11: Reverted Telegram to parse_mode=Markdown (from MarkdownV2) to fix notification failures, simplified escape_markdown for Markdown (escape _, *, [, ], (, ), `, #), added HTTP status code logging, validated TG_BOT_TOKEN/TG_CHAT_IDS in send_telegram
 # - v3.0.10: Fixed sed error in escape_markdown (corrected regex for special chars), switched Telegram to parse_mode=MarkdownV2 for reliable \n, enhanced MarkdownV2 escaping (:, `), added curl command logging, added log view in test menu
 # - v3.0.9: Restored v2.8 Telegram push (use -d instead of --data-urlencode, parse_mode=Markdown), fixed \n line break issue, removed DEBUG_TG/TG_EMOJI user prompts (fixed to 1), set default config options to 1 (Enter for yes), added Markdown special character escaping
 # - v3.0.8: Restored v2.2 Telegram settings (use parse_mode=Markdown for \n line breaks), removed TG_PARSE_MODE, retained TG_EMOJI and DEBUG_TG
@@ -246,24 +247,29 @@ validate_input() {
     return 0
 }
 
-# Escape MarkdownV2 special characters
+# Escape Markdown special characters
 escape_markdown() {
     local text="$1"
-    # Escape MarkdownV2 special characters: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !, :
-    # Note: \ must be escaped as \\, and other regex chars ([, ], (, ), *, |, .) must be escaped in sed
-    echo "$text" | sed 's/[_\*\\\[\]\\(\\)\\~\\>\\#\\+\\-\\=\\|\\{\\}\\.\\!\\:]/\\&/g'
+    # Escape Markdown special characters: _, *, [, ], (, ), `, #
+    # Note: \ must be escaped as \\, and regex chars ([, ], (, ), *) must be escaped in sed
+    echo "$text" | sed 's/[_\*\\\[\]\\(\\)\\`\\#]/\\&/g'
 }
 
 # Send Telegram notification
 send_telegram() {
     local message="$1"
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
+        # Validate configuration
+        if [[ -z "$TG_BOT_TOKEN" || -z "$TG_CHAT_IDS" ]]; then
+            log "ERROR: Telegram notification skipped: TG_BOT_TOKEN or TG_CHAT_IDS is empty"
+            return 1
+        fi
         # Apply emoji if enabled
         local final_message="$message"
         if [[ "$TG_EMOJI" -eq 1 ]]; then
             final_message=$(echo "$message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
         fi
-        # Escape MarkdownV2 special characters
+        # Escape Markdown special characters
         final_message=$(escape_markdown "$final_message")
         if [[ "$DEBUG_TG" -eq 1 ]]; then
             log "DEBUG: Original message: $message"
@@ -271,23 +277,28 @@ send_telegram() {
         fi
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local url="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
-            local curl_cmd="curl -s -m 5 -X POST \"$url\" -d \"chat_id=${chat_id}\" -d \"text=${final_message}\" -d \"parse_mode=MarkdownV2\""
+            local curl_cmd="curl -s -m 5 -w '%{http_code}' -X POST \"$url\" -d \"chat_id=${chat_id}\" -d \"text=${final_message}\" -d \"parse_mode=Markdown\""
             if [[ "$DEBUG_TG" -eq 1 ]]; then
                 log "DEBUG: Curl command: $curl_cmd"
             fi
-            local response=$(eval "$curl_cmd")
+            local output=$(eval "$curl_cmd")
+            local http_code=${output: -3}
+            local response=${output%???}
             local is_ok=$(echo "$response" | grep -o '"ok":true')
             local message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
             local error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
             if [[ "$DEBUG_TG" -eq 1 ]]; then
+                log "DEBUG: HTTP status code: $http_code"
                 log "DEBUG: Telegram response: $response"
             fi
-            if [[ -n "$is_ok" && -n "$message_id" ]]; then
+            if [[ -n "$is_ok" && -n "$message_id" && "$http_code" == "200" ]]; then
                 log "Telegram notification sent to $chat_id (message_id: $message_id): $final_message"
             else
-                log "ERROR: Failed to send Telegram message to $chat_id: $response (Description: $error_desc)"
+                log "ERROR: Failed to send Telegram message to $chat_id (HTTP $http_code): $response (Description: $error_desc)"
             fi
         done
+    else
+        log "Telegram notification skipped: Disabled or incomplete config"
     fi
 }
 
@@ -517,7 +528,7 @@ guided_config() {
                         local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                             -d "chat_id=${chat_id}" \
                             -d "text=${test_message}" \
-                            -d "parse_mode=MarkdownV2")
+                            -d "parse_mode=Markdown")
                         if echo "$response" | grep -q '"ok":true'; then
                             valid_ids+="$chat_id,"
                         else
@@ -813,7 +824,7 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}║       Version: 3.0.10             ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.11             ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
