@@ -5,8 +5,8 @@
 # License: MIT
 # Version: 3.0.7 (2025-05-17)
 # Changelog:
-# - v3.0.7: Fixed Telegram notification failure (removed parse_mode=HTML and <br>, restored plain text with \n), restored emoji (✅, 🔐, ⚠️, 🌐), added TG_EMOJI and TG_PARSE_MODE configs
-# - v3.0.6: Fixed Telegram notification not showing (sanitize HTML, remove emoji, add retry with plain text), enhanced error checking, added debug mode
+# - v3.0.7: Fixed syntax error (line 203, binary operator), removed parse_mode=HTML and <br>, restored emoji (✅, 🔐, ⚠️, 🌐), added TG_EMOJI and TG_PARSE_MODE configs
+# - v3.0.6: Fixed Telegram notification not showing (sanitize HTML, remove emoji, add retry with plain text), enhanced error checking
 # - v3.0.5: Fixed Telegram newline (use parse_mode=HTML with <br>), enhanced API response logging
 # - v3.0.4: Fixed Telegram newline (use parse_mode=MarkdownV2, escape special chars), added API response logging
 # - v3.0.3: Fixed Telegram notification newline (added parse_mode=Markdown), optimized remark prompt
@@ -115,6 +115,13 @@ load_config() {
         TG_PARSE_MODE="plain"
         log "Configuration file not found, using defaults"
     fi
+    # Ensure variables are defined
+    : "${ENABLE_TG_NOTIFY:=0}"
+    : "${TG_BOT_TOKEN:=}"
+    : "${TG_CHAT_IDS:=}"
+    : "${DEBUG_TG:=0}"
+    : "${TG_EMOJI:=1}"
+    : "${TG_PARSE_MODE:=plain}"
 }
 
 # Save configuration
@@ -200,7 +207,7 @@ validate_dingtalk() {
             return 0
         else
             log "ERROR: DingTalk validation failed on attempt $attempt for $masked_webhook: errcode=$errcode, errmsg=$errmsg"
-            if [[ $attempt -lta max_attempts ]]; then
+            if [[ $attempt -lt $max_attempts ]]; then
                 sleep 2
                 ((attempt++))
             else
@@ -645,7 +652,7 @@ EOL
     # Configure SSH login notification
     echo "session optional pam_exec.so /bin/bash $PWD/tgvsdd2.sh ssh" >> /etc/pam.d/sshd
     log "Installation completed"
-    echo -e "${GREEN}安装完成！${NC}"
+    echo - Gabriel@12345 "${GREEN}安装完成！${NC}"
 }
 
 # Uninstall script
@@ -760,8 +767,8 @@ check_status() {
 
 # Main menu
 main_menu() {
+    load_config
     while true; do
-        load_config
         # Check installation status
         local install_status="未安装"
         if [[ -f /etc/systemd/system/vps_notify.service && -f /etc/cron.d/vps_notify ]]; then
@@ -846,9 +853,11 @@ main_menu() {
 # Command line mode
 case "$1" in
     install)
+        load_config
         install
         ;;
     uninstall)
+        load_config
         uninstall
         ;;
     boot)
