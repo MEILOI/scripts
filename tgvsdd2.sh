@@ -1,11 +1,12 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.7
+# VPS Notify Script (tgvsdd2.sh) v3.0.8
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.7 (2025-05-17)
+# Version: 3.0.8 (2025-05-17)
 # Changelog:
-# - v3.0.7: Fixed syntax error (line 203, binary operator), removed parse_mode=HTML and <br>, restored emoji (✅, 🔐, ⚠️, 🌐), added TG_EMOJI and TG_PARSE_MODE configs
+# - v3.0.8: Restored v2.2 Telegram settings (use parse_mode=Markdown for \n line breaks), removed TG_PARSE_MODE, retained TG_EMOJI and DEBUG_TG
+# - v3.0.7: Fixed syntax error (line 203, binary operator), removed parse_mode=HTML and <br>, restored emoji (✅, 🔐, ⚠️, 🌐), added TG_EMOJI and TG_PARSE_MODE
 # - v3.0.6: Fixed Telegram notification not showing (sanitize HTML, remove emoji, add retry with plain text), enhanced error checking
 # - v3.0.5: Fixed Telegram newline (use parse_mode=HTML with <br>), enhanced API response logging
 # - v3.0.4: Fixed Telegram newline (use parse_mode=MarkdownV2, escape special chars), added API response logging
@@ -28,7 +29,6 @@ LOG_MAX_SIZE=$((1024*1024)) # 1MB
 LOG_RETENTION_DAYS=7
 DEBUG_TG=0 # Debug mode for Telegram (1=enabled, 0=disabled)
 TG_EMOJI=1 # Enable emoji in Telegram messages (1=enabled, 0=disabled)
-TG_PARSE_MODE="plain" # Telegram parse mode (plain, html)
 
 # Logging function
 log() {
@@ -112,7 +112,6 @@ load_config() {
         REMARK=""
         DEBUG_TG=0
         TG_EMOJI=1
-        TG_PARSE_MODE="plain"
         log "Configuration file not found, using defaults"
     fi
     # Ensure variables are defined
@@ -121,7 +120,6 @@ load_config() {
     : "${TG_CHAT_IDS:=}"
     : "${DEBUG_TG:=0}"
     : "${TG_EMOJI:=1}"
-    : "${TG_PARSE_MODE:=plain}"
 }
 
 # Save configuration
@@ -145,7 +143,6 @@ ALERT_INTERVAL=$ALERT_INTERVAL
 REMARK="$REMARK"
 DEBUG_TG=$DEBUG_TG
 TG_EMOJI=$TG_EMOJI
-TG_PARSE_MODE="$TG_PARSE_MODE"
 EOL
     log "Configuration saved to $CONFIG_FILE"
 }
@@ -243,12 +240,6 @@ validate_input() {
                 fi
             done
             ;;
-        parse_mode)
-            if [[ "$value" != "plain" && "$value" != "html" ]]; then
-                echo -e "${RED}错误：Parse mode 必须为 plain 或 html${NC}"
-                return 1
-            fi
-            ;;
     esac
     return 0
 }
@@ -268,11 +259,10 @@ send_telegram() {
         fi
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local url="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
-            local curl_cmd=(curl -s -m 5 -X POST "$url" --data-urlencode "chat_id=${chat_id}" --data-urlencode "text=$final_message")
-            if [[ "$TG_PARSE_MODE" == "html" ]]; then
-                curl_cmd+=(--data-urlencode "parse_mode=HTML")
-            fi
-            local response=$("${curl_cmd[@]}")
+            local response=$(curl -s -m 5 -X POST "$url" \
+                --data-urlencode "chat_id=${chat_id}" \
+                --data-urlencode "text=${final_message}" \
+                --data-urlencode "parse_mode=Markdown")
             local is_ok=$(echo "$response" | grep -o '"ok":true')
             local message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
             local error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
@@ -509,7 +499,8 @@ guided_config() {
                     for chat_id in ${TG_CHAT_IDS//,/ }; do
                         local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                             --data-urlencode "chat_id=${chat_id}" \
-                            --data-urlencode "text=${test_message}")
+                            --data-urlencode "text=${test_message}" \
+                            --data-urlencode "parse_mode=Markdown")
                         if echo "$response" | grep -q '"ok":true'; then
                             valid_ids+="$chat_id,"
                         else
@@ -533,23 +524,17 @@ guided_config() {
                 read -p "启用 Telegram emoji？(1=是, 0=否): " TG_EMOJI
                 validate_input yes_no "$TG_EMOJI" && break
             done
-            while true; do
-                read -p "Telegram 消息格式 (plain=纯文本, html=HTML): " TG_PARSE_MODE
-                validate_input parse_mode "$TG_PARSE_MODE" && break
-            done
         else
             TG_BOT_TOKEN=""
             TG_CHAT_IDS=""
             DEBUG_TG=0
             TG_EMOJI=1
-            TG_PARSE_MODE="plain"
         fi
     else
         TG_BOT_TOKEN=""
         TG_CHAT_IDS=""
         DEBUG_TG=0
         TG_EMOJI=1
-        TG_PARSE_MODE="plain"
     fi
 
     # DingTalk
@@ -652,7 +637,7 @@ EOL
     # Configure SSH login notification
     echo "session optional pam_exec.so /bin/bash $PWD/tgvsdd2.sh ssh" >> /etc/pam.d/sshd
     log "Installation completed"
-    echo - Gabriel@12345 "${GREEN}安装完成！${NC}"
+    echo -e "${GREEN}安装完成！${NC}"
 }
 
 # Uninstall script
@@ -681,6 +666,7 @@ update_script() {
         else
             log "ERROR: Downloaded script is empty"
             echo -e "${RED}更新失败：下载的脚本为空${NC}"
+       Shell
         fi
     else
         log "ERROR: Failed to download script from $remote_url"
@@ -792,7 +778,7 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}║       Version: 3.0.7              ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.8              ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
@@ -801,7 +787,6 @@ main_menu() {
         echo -e "Telegram Chat IDs: ${TG_CHAT_IDS:-未设置}"
         echo -e "Telegram 调试模式: ${DEBUG_TG:-0} (1=Y, 0=N)"
         echo -e "Telegram Emoji: ${TG_EMOJI:-1} (1=Y, 0=N)"
-        echo -e "Telegram 消息格式: ${TG_PARSE_MODE:-plain}"
         echo -e "DingTalk Webhook: $dt_webhook_display"
         echo -e "DingTalk 通知: ${ENABLE_DINGTALK_NOTIFY:-0} (1=Y, 0=N)"
         echo -e "DingTalk Secret: $dt_secret_display"
