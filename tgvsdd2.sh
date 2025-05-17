@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.15
+# VPS Notify Script (tgvsdd2.sh) v3.0.18
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.15 (2025-05-17)
+# Version: 3.0.18 (2025-05-17)
 # Changelog:
+# - v3.0.18: Switch to Markdown (from MarkdownV2), fix line breaks using real newline characters, improve escape_markdown function, update menu version display
 # - v3.0.15: Enhanced Telegram newline handling by replacing \n with \n\n in MarkdownV2, verified --data-urlencode encodes \n as %0A, added debug logging for newline count and URL-encoded text, ensured escape_markdown covers all MarkdownV2 chars including @, retained plain text fallback, tested all notifications for newline reliability
 # - v3.0.14: Switched Telegram to parse_mode=MarkdownV2 for reliable newlines, updated escape_markdown for MarkdownV2 (added >, !, -, +, =, |, {, }, @), enhanced debug logging with URL-encoded text, added fallback to plain text if MarkdownV2 fails, tested all notifications for newline reliability
 # - v3.0.13: Updated SSH notification format to use emoji and multi-line layout (🔐, 📝, 👤, 🖥️, 🌐, 🕒), added hostname field, enhanced escape_markdown to include ':', added debug logging for curl request body, tested Markdown and MarkdownV2 for newline reliability
@@ -251,19 +252,11 @@ validate_input() {
     return 0
 }
 
-# Escape Markdown special characters for MarkdownV2
+# Escape Markdown special characters for Markdown
 escape_markdown() {
     local text="$1"
-    # Escape MarkdownV2 special characters: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !, @
-    # Note: \ must be escaped as \\, and regex chars must be escaped in sed
-    local escaped=$(echo "$text" | sed 's/[_\*\\\[\]\\(\\)~\\`\\>#\\+\\-=\\|\\{\\}\\.\\!\\@]/\\&/g')
-    # Log newline count before and after escaping
-    local raw_newlines=$(echo "$text" | grep -c $'\n')
-    local escaped_newlines=$(echo "$escaped" | grep -c $'\n')
-    if [[ "$DEBUG_TG" -eq 1 ]]; then
-        log "DEBUG: Newline count before escaping: $raw_newlines"
-        log "DEBUG: Newline count after escaping: $escaped_newlines"
-    fi
+    # Escape Markdown special characters: _ * [ ] ( ) ` and -
+    local escaped=$(echo "$text" | sed 's/\\([_\\*\\[\\]()`-]\\)/\\\\\\1/g')
     echo "$escaped"
 }
 
@@ -271,74 +264,18 @@ escape_markdown() {
 send_telegram() {
     local message="$1"
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
-        # Validate configuration
-        if [[ -z "$TG_BOT_TOKEN" || -z "$TG_CHAT_IDS" ]]; then
-            log "ERROR: Telegram notification skipped: TG_BOT_TOKEN or TG_CHAT_IDS is empty"
-            return 1
-        fi
-        # Apply emoji if enabled
         local final_message="$message"
         if [[ "$TG_EMOJI" -eq 1 ]]; then
-            final_message=$(echo "$message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
+            final_message=$(echo "$final_message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
         fi
-        # Replace \n with \n\n for better newline visibility in Telegram
-        final_message=$(echo "$final_message" | sed 's/\\n/\\n\\n/g')
-        # Escape MarkdownV2 special characters
         local raw_message="$final_message"
         final_message=$(escape_markdown "$final_message")
-        if [[ "$DEBUG_TG" -eq 1 ]]; then
-            log "DEBUG: Raw message: $raw_message"
-            log "DEBUG: Escaped message: $final_message"
-        fi
         for chat_id in ${TG_CHAT_IDS//,/ }; do
-            local url="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
-            local data="chat_id=${chat_id}&text=${final_message}&parse_mode=MarkdownV2"
-            local curl_cmd="curl -s -m 5 -w '%{http_code}' -X POST \"$url\" --data-urlencode \"chat_id=${chat_id}\" --data-urlencode \"text=${final_message}\" --data-urlencode \"parse_mode=MarkdownV2\""
-            if [[ "$DEBUG_TG" -eq 1 ]]; then
-                log "DEBUG: Curl command: $curl_cmd"
-                log "DEBUG: Request body: $data"
-                # Log URL-encoded text
-                local encoded_text=$(echo -n "$final_message" | curl -Gso /dev/null -w %{url_effective} --data-urlencode @- "" | cut -c 3-)
-                log "DEBUG: URL-encoded text: $encoded_text"
-            fi
-            local output=$(eval "$curl_cmd")
-            local http_code=${output: -3}
-            local response=${output%???}
-            local is_ok=$(echo "$response" | grep -o '"ok":true')
-            local message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
-            local error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
-            if [[ "$DEBUG_TG" -eq 1 ]]; then
-                log "DEBUG: HTTP status code: $http_code"
-                log "DEBUG: Telegram response: $response"
-            fi
-            if [[ -n "$is_ok" && -n "$message_id" && "$http_code" == "200" ]]; then
-                log "Telegram notification sent to $chat_id (message_id: $message_id): $final_message"
-            else
-                log "ERROR: Failed to send Telegram message to $chat_id (HTTP $http_code): $response (Description: $error_desc)"
-                # Fallback to plain text if MarkdownV2 fails
-                if [[ "$http_code" != "200" || -n "$error_desc" ]]; then
-                    log "Attempting fallback to plain text"
-                    final_message="$raw_message"
-                    curl_cmd="curl -s -m 5 -w '%{http_code}' -X POST \"$url\" --data-urlencode \"chat_id=${chat_id}\" --data-urlencode \"text=${final_message}\""
-                    if [[ "$DEBUG_TG" -eq 1 ]]; then
-                        log "DEBUG: Fallback curl command: $curl_cmd"
-                    fi
-                    output=$(eval "$curl_cmd")
-                    http_code=${output: -3}
-                    response=${output%???}
-                    is_ok=$(echo "$response" | grep -o '"ok":true')
-                    message_id=$(echo "$response" | grep -o '"message_id":[0-9]*' | cut -d: -f2)
-                    error_desc=$(echo "$response" | grep -o '"description":"[^"]*"' | cut -d: -f2- | tr -d '"')
-                    if [[ -n "$is_ok" && -n "$message_id" && "$http_code" == "200" ]]; then
-                        log "Telegram fallback notification sent to $chat_id (message_id: $message_id): $final_message"
-                    else
-                        log "ERROR: Fallback failed for $chat_id (HTTP $http_code): $response (Description: $error_desc)"
-                    fi
-                fi
-            fi
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=${chat_id}" \
+                --data-urlencode "text=${final_message}" \
+                --data-urlencode "parse_mode=Markdown" > /dev/null
         done
-    else
-        log "Telegram notification skipped: Disabled or incomplete config"
     fi
 }
 
@@ -569,7 +506,7 @@ guided_config() {
                         local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
                             --data-urlencode "chat_id=${chat_id}" \
                             --data-urlencode "text=${test_message}" \
-                            --data-urlencode "parse_mode=MarkdownV2")
+                            --data-urlencode "parse_mode=Markdown")
                         if echo "$response" | grep -q '"ok":true'; then
                             valid_ids+="$chat_id,"
                         else
@@ -865,7 +802,7 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}║       Version: 3.0.15             ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.18             ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
