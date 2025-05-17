@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd2.sh) v3.0.11
+# VPS Notify Script (tgvsdd2.sh) v3.0.12
 # Purpose: Monitor VPS status (IP, SSH, resources, network) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0.11 (2025-05-17)
+# Version: 3.0.12 (2025-05-17)
 # Changelog:
+# - v3.0.12: Enhanced escape_markdown to include '.' for Telegram Markdown, improved newline handling with --data-urlencode, added debug logging for raw and escaped messages, tested all notification types
 # - v3.0.11: Reverted Telegram to parse_mode=Markdown (from MarkdownV2) to fix notification failures, simplified escape_markdown for Markdown (escape _, *, [, ], (, ), `, #), added HTTP status code logging, validated TG_BOT_TOKEN/TG_CHAT_IDS in send_telegram
 # - v3.0.10: Fixed sed error in escape_markdown (corrected regex for special chars), switched Telegram to parse_mode=MarkdownV2 for reliable \n, enhanced MarkdownV2 escaping (:, `), added curl command logging, added log view in test menu
 # - v3.0.9: Restored v2.8 Telegram push (use -d instead of --data-urlencode, parse_mode=Markdown), fixed \n line break issue, removed DEBUG_TG/TG_EMOJI user prompts (fixed to 1), set default config options to 1 (Enter for yes), added Markdown special character escaping
@@ -190,7 +191,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}×tamp=${timestamp}&sign=${sign}"
+            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
         fi
 
         # Send test message (includes keyword "VPS")
@@ -250,9 +251,9 @@ validate_input() {
 # Escape Markdown special characters
 escape_markdown() {
     local text="$1"
-    # Escape Markdown special characters: _, *, [, ], (, ), `, #
-    # Note: \ must be escaped as \\, and regex chars ([, ], (, ), *) must be escaped in sed
-    echo "$text" | sed 's/[_\*\\\[\]\\(\\)\\`\\#]/\\&/g'
+    # Escape Markdown special characters: _, *, [, ], (, ), `, #, .
+    # Note: \ must be escaped as \\, and regex chars ([, ], (, ), *, .) must be escaped in sed
+    echo "$text" | sed 's/[_\*\\\[\]\\(\\)\\`\\#\\.]/\\&/g'
 }
 
 # Send Telegram notification
@@ -270,14 +271,15 @@ send_telegram() {
             final_message=$(echo "$message" | sed 's/\[成功\]/✅/g; s/\[登录\]/🔐/g; s/\[警告\]/⚠️/g; s/\[网络\]/🌐/g')
         fi
         # Escape Markdown special characters
+        local raw_message="$final_message"
         final_message=$(escape_markdown "$final_message")
         if [[ "$DEBUG_TG" -eq 1 ]]; then
-            log "DEBUG: Original message: $message"
-            log "DEBUG: Final message: $final_message"
+            log "DEBUG: Raw message: $raw_message"
+            log "DEBUG: Escaped message: $final_message"
         fi
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local url="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
-            local curl_cmd="curl -s -m 5 -w '%{http_code}' -X POST \"$url\" -d \"chat_id=${chat_id}\" -d \"text=${final_message}\" -d \"parse_mode=Markdown\""
+            local curl_cmd="curl -s -m 5 -w '%{http_code}' -X POST \"$url\" --data-urlencode \"chat_id=${chat_id}\" --data-urlencode \"text=${final_message}\" --data-urlencode \"parse_mode=Markdown\""
             if [[ "$DEBUG_TG" -eq 1 ]]; then
                 log "DEBUG: Curl command: $curl_cmd"
             fi
@@ -321,7 +323,7 @@ send_dingtalk() {
             if [[ -n "$DINGTALK_SECRET" ]]; then
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${webhook}×tamp=${timestamp}&sign=${sign}"
+                url="${webhook}&timestamp=${timestamp}&sign=${sign}"
             fi
 
             response=$(curl -s -m 5 -X POST "$url" \
@@ -526,9 +528,9 @@ guided_config() {
                     local valid_ids=""
                     for chat_id in ${TG_CHAT_IDS//,/ }; do
                         local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                            -d "chat_id=${chat_id}" \
-                            -d "text=${test_message}" \
-                            -d "parse_mode=Markdown")
+                            --data-urlencode "chat_id=${chat_id}" \
+                            --data-urlencode "text=${test_message}" \
+                            --data-urlencode "parse_mode=Markdown")
                         if echo "$response" | grep -q '"ok":true'; then
                             valid_ids+="$chat_id,"
                         else
@@ -824,7 +826,7 @@ main_menu() {
         # Display menu
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}║       VPS 通知系統 (高級版)       ║${NC}"
-        echo -e "${GREEN}║       Version: 3.0.11             ║${NC}"
+        echo -e "${GREEN}║       Version: 3.0.12             ║${NC}"
         echo -e "${GREEN}════════════════════════════════════════${NC}"
         echo -e "${GREEN}● 通知系统${install_status}${NC}\n"
         echo -e "当前配置:"
