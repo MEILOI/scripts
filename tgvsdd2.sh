@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # VPS Notify Script (tgvsdd2.sh)
-# Version: 2.8.1 (2025-05-18)
+# Version: 2.8.1.1 (2025-05-18)
 # Purpose: Simple VPS notification system with Telegram integration
-# Fixes: Telegram newline bug, CPU 100% bug, menu display, compatibility
+# Fixes: Telegram newline bug
 
 # Configuration
 LOG_FILE="/var/log/vps_notify.log"
@@ -11,7 +11,7 @@ CONFIG_FILE="/etc/vps_notify.conf"
 TG_BOT_TOKEN=""
 TG_CHAT_ID=""
 SCRIPT_NAME="tgvsdd2.sh"
-VERSION="2.8.1"
+VERSION="2.8.1.1"
 
 # Load configuration
 if [ -f "$CONFIG_FILE" ]; then
@@ -28,7 +28,7 @@ escape_markdown() {
     echo "$1" | sed 's/\\([_*\\[]\\[`#+=\\-|.{}()!]\\)/\\\\\\1/g' 2>/dev/null
 }
 
-# Send Telegram notification
+# Send Telegram notification (fixed newline bug)
 send_telegram() {
     local message="$1"
     if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
@@ -113,7 +113,7 @@ test_notification() {
     main_menu
 }
 
-# Monitor network (fixed CPU 100% bug)
+# Monitor network
 monitor() {
     if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
         echo "未配置 Telegram，请先配置"
@@ -136,7 +136,7 @@ monitor() {
             last_status="$status"
         fi
         count=$((count + 1))
-        sleep 10  # Reduce CPU load
+        sleep 10
     done
     log "Network monitor stopped after $max_runs runs"
     echo "网络监控已停止"
