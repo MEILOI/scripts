@@ -1,10 +1,10 @@
 #!/bin/bash
-# VPS Notify Script for Alpine Linux (tgvsdd3-alpine.sh) v3.0.4
+# VPS Notify Script for Alpine Linux (tgvsdd3-alpine.sh) v3.0.5
 # Monitors IP changes, SSH logins, and system resources, sends notifications via Telegram and DingTalk
 # Simplified for minimal dependencies and core functionality
 
 # Constants
-SCRIPT_VERSION="3.0.4"
+SCRIPT_VERSION="3.0.5"
 SCRIPT_PATH="/usr/local/bin/vps_notify.sh"
 CONFIG_FILE="/etc/vps_notify.conf"
 LOG_FILE="/var/log/vps_notify.log"
@@ -61,14 +61,12 @@ send_notification() {
     local timestamp sign encoded_sign
     # Telegram
     if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_IDS" ]; then
-        message=$(echo "$message" | sed 's/\\n/<br>/g')
         IFS=',' read -ra CHAT_IDS <<< "$TELEGRAM_CHAT_IDS"
         for chat_id in "${CHAT_IDS[@]}"; do
             response=$(curl -s -w "%{http_code}" -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
                 -d chat_id="$chat_id" \
                 -d text="$message" \
-                -d parse_mode="HTML" \
-                -m 10)
+                -m 10 2>&1)
             http_code=${response##*[!0-9]}
             response=${response%[0-9]*}
             if [ "$http_code" -eq 200 ] && echo "$response" | grep -q '"ok":true'; then
@@ -93,10 +91,13 @@ send_notification() {
         fi
         url="$DINGTALK_TOKEN"
         [ -n "$encoded_sign" ] && url="${url}×tamp=$timestamp&sign=$encoded_sign"
+        # Include DingTalk keyword if set
+        local dingtalk_message="$message"
+        [ -n "$DINGTALK_KEYWORD" ] && dingtalk_message="$DINGTALK_KEYWORD\n$message"
         for attempt in {1..3}; do
             response=$(curl -s -w "%{http_code}" -m 10 "$url" \
                 -H 'Content-Type: application/json' \
-                -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"$message\"}}")
+                -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"$dingtalk_message\"}}" 2>&1)
             http_code=${response##*[!0-9]}
             response=${response%[0-9]*}
             if [ "$http_code" -eq 200 ] && echo "$response" | grep -q '"errcode":0'; then
@@ -123,7 +124,7 @@ validate_telegram() {
         log "ERROR: Telegram Token or Chat ID empty"
         return 1
     fi
-    response=$(curl -s -m 10 "https://api.telegram.org/bot$token/getMe")
+    response=$(curl -s -m 10 "https://api.telegram.org/bot$token/getMe" 2>&1)
     if ! echo "$response" | grep -q '"ok":true'; then
         echo "錯誤：無效的 Telegram Token"
         log "ERROR: Invalid Telegram Token: $response"
@@ -135,16 +136,18 @@ validate_telegram() {
 
 # Validate DingTalk configuration
 validate_dingtalk() {
-    local token="$1"
+    local token="$1" keyword="$2"
     if [ -z "$token" ]; then
         echo "錯誤：DingTalk Webhook 為空"
         log "ERROR: DingTalk Webhook empty"
         return 1
     fi
+    local test_message="測試消息"
+    [ -n "$keyword" ] && test_message="$keyword\n$test_message"
     for attempt in {1..3}; do
         response=$(curl -s -w "%{http_code}" -m 10 "$token" \
             -H 'Content-Type: application/json' \
-            -d '{"msgtype":"text","text":{"content":"測試消息"}}')
+            -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"$test_message\"}}" 2>&1)
         http_code=${response##*[!0-9]}
         response=${response%[0-9]*}
         if [ "$http_code" -eq 200 ] && echo "$response" | grep -q '"errcode":0'; then
@@ -155,7 +158,7 @@ validate_dingtalk() {
             sleep 1
         fi
     done
-    echo "錯誤：無效的 DingTalk Webhook，請檢查 Webhook URL 和網絡設置"
+    echo "錯誤：無效的 DingTalk Webhook 或關鍵詞不匹配，請檢查 Webhook URL 和關鍵詞設置"
     log "ERROR: DingTalk validation failed after 3 attempts"
     return 1
 }
@@ -206,12 +209,17 @@ install_script() {
     echo "設置 DingTalk 通知"
     read -p "輸入 DingTalk Webhook（留空跳過）: " DINGTALK_TOKEN
     read -p "輸入 DingTalk Secret（留空跳過）: " DINGTALK_SECRET
+    read -p "輸入 DingTalk 關鍵詞（留空跳過）: " DINGTALK_KEYWORD
     if [ -n "$DINGTALK_TOKEN" ]; then
-        if validate_dingtalk "$DINGTALK_TOKEN"; then
+        if validate_dingtalk "$DINGTALK_TOKEN" "$DINGTALK_KEYWORD"; then
             modify_config "DINGTALK_TOKEN" "$DINGTALK_TOKEN"
             [ -n "$DINGTALK_SECRET" ] && modify_config "DINGTALK_SECRET" "$DINGTALK_SECRET"
+            [ -n "$DINGTALK_KEYWORD" ] && modify_config "DINGTALK_KEYWORD" "$DINGTALK_KEYWORD"
         else
-            echo "DingTalk 配置無效，未保存"
+            echo "DingTalk 配置驗證失敗，仍保存配置"
+            modify_config "DINGTALK_TOKEN" "$DINGTALK_TOKEN"
+            [ -n "$DINGTALK_SECRET" ] && modify_config "DINGTALK_SECRET" "$DINGTALK_SECRET"
+            [ -n "$DINGTALK_KEYWORD" ] && modify_config "DINGTALK_KEYWORD" "$DINGTALK_KEYWORD"
         fi
     fi
     # Install OpenRC service
@@ -282,7 +290,7 @@ notify_boot() {
     hostname=$(hostname)
     ip=$(curl -s ipinfo.io/ip)
     time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-    message="🖥️ <b>開機通知</b><br><br>📝 備註: ${REMARK:-未設置}<br>🖥️ 主機: $hostname<br>🌐 IP: $ip<br>🕒 時間: $time"
+    message="🖥️ 開機通知\n\n📝 備註: ${REMARK:-未設置}\n🖥️ 主機: $hostname\n🌐 IP: $ip\n🕒 時間: $time"
     send_notification "$message"
     log "Boot notification sent"
 }
@@ -298,7 +306,7 @@ notify_ssh() {
         ip=$(tail -n 1 "$log_file" | grep "Accepted" | gawk '{print $11}')
         hostname=$(hostname)
         time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-        message="🔐 <b>SSH 登錄通知</b><br><br>📝 備註: ${REMARK:-未設置}<br>👤 用戶: $user<br>🖥️ 主機: $hostname<br>🌐 來源 IP: $ip<br>🕒 時間: $time"
+        message="🔐 SSH 登錄通知\n\n📝 備註: ${REMARK:-未設置}\n👤 用戶: $user\n🖥️ 主機: $hostname\n🌐 來源 IP: $ip\n🕒 時間: $time"
         send_notification "$message"
         log "SSH login notification sent: $user from $ip"
     fi
@@ -313,7 +321,7 @@ monitor_resources() {
     if [ "$memory_usage" -gt "${MEMORY_THRESHOLD:-90}" ] || [ "$cpu_usage" -gt "${CPU_THRESHOLD:-90}" ]; then
         hostname=$(hostname)
         time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-        message="⚠️ <b>資源警報</b><br><br>📝 備註: ${REMARK:-未設置}<br>🖥️ 主機: $hostname<br>📈 內存使用率: ${memory_usage}%<br>📊 CPU 使用率: ${cpu_usage}%<br>🕒 時間: $time"
+        message="⚠️ 資源警報\n\n📝 備註: ${REMARK:-未設置}\n🖥️ 主機: $hostname\n📈 內存使用率: ${memory_usage}%\n📊 CPU 使用率: ${cpu_usage}%\n🕒 時間: $time"
         send_notification "$message"
         log "Resource alert: Memory=$memory_usage%, CPU=$cpu_usage%"
     fi
@@ -332,7 +340,7 @@ monitor_ip() {
     if [ "$current_ip" != "$previous_ip" ] && [ -n "$current_ip" ]; then
         hostname=$(hostname)
         time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-        message="🌐 <b>IP 變動通知</b><br><br>📝 備註: ${REMARK:-未設置}<br>🖥️ 主機: $hostname<br>🔙 原 IP: ${previous_ip:-未知}<br>➡️ 新 IP: $current_ip<br>🕒 時間: $time"
+        message="🌐 IP 變動通知\n\n📝 備註: ${REMARK:-未設置}\n🖥️ 主機: $hostname\n🔙 原 IP: ${previous_ip:-未知}\n➡️ 新 IP: $current_ip\n🕒 時間: $time"
         send_notification "$message"
         echo "$current_ip" > "$CURRENT_IP_FILE"
         log "IP change detected: $previous_ip -> $current_ip"
@@ -378,12 +386,17 @@ config_menu() {
         2)
             read -p "輸入 DingTalk Webhook: " DINGTALK_TOKEN
             read -p "輸入 DingTalk Secret（留空跳過）: " DINGTALK_SECRET
-            if validate_dingtalk "$DINGTALK_TOKEN"; then
+            read -p "輸入 DingTalk 關鍵詞（留空跳過）: " DINGTALK_KEYWORD
+            if validate_dingtalk "$DINGTALK_TOKEN" "$DINGTALK_KEYWORD"; then
                 modify_config "DINGTALK_TOKEN" "$DINGTALK_TOKEN"
                 [ -n "$DINGTALK_SECRET" ] && modify_config "DINGTALK_SECRET" "$DINGTALK_SECRET"
+                [ -n "$DINGTALK_KEYWORD" ] && modify_config "DINGTALK_KEYWORD" "$DINGTALK_KEYWORD"
                 echo "DingTalk 配置已更新"
             else
-                echo "DingTalk 配置無效，未保存"
+                echo "DingTalk 配置驗證失敗，仍保存配置"
+                modify_config "DINGTALK_TOKEN" "$DINGTALK_TOKEN"
+                [ -n "$DINGTALK_SECRET" ] && modify_config "DINGTALK_SECRET" "$DINGTALK_SECRET"
+                [ -n "$DINGTALK_KEYWORD" ] && modify_config "DINGTALK_KEYWORD" "$DINGTALK_KEYWORD"
             fi
             ;;
         3)
