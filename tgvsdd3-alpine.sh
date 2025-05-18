@@ -1,9 +1,9 @@
 #!/bin/bash
-# VPS Notify Script for Alpine Linux (tgvsdd3-alpine.sh) v3.0.1
+# VPS Notify Script for Alpine Linux (tgvsdd3-alpine.sh) v3.0.2
 # Monitors IP changes, SSH logins, and system resources, sends notifications via Telegram and DingTalk
 
 # Constants
-SCRIPT_VERSION="3.0.1"
+SCRIPT_VERSION="3.0.2"
 SCRIPT_PATH="/usr/local/bin/vps_notify.sh"
 CONFIG_FILE="/etc/vps_notify.conf"
 LOG_FILE="/var/log/vps_notify.log"
@@ -56,20 +56,25 @@ check_dependencies() {
 # Send notification
 send_notification() {
     local message="$1"
-    local timestamp sign
+    local timestamp sign encoded_sign
     # Telegram
     if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_IDS" ]; then
+        # Convert \n to <br> for HTML mode
+        message=$(echo "$message" | sed 's/\\n/<br>/g')
         IFS=',' read -ra CHAT_IDS <<< "$TELEGRAM_CHAT_IDS"
         for chat_id in "${CHAT_IDS[@]}"; do
-            response=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+            response=$(curl -s -w "%{http_code}" -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
                 -d chat_id="$chat_id" \
                 -d text="$message" \
-                -d parse_mode="Markdown" \
+                -d parse_mode="HTML" \
                 -m 10)
-            if echo "$response" | grep -q '"ok":true'; then
+            http_code=${response##*[!0-9]}
+            response=${response%[0-9]*}
+            if [ "$http_code" -eq 200 ] && echo "$response" | grep -q '"ok":true'; then
                 log "Telegram notification sent to $chat_id"
             else
-                log "ERROR: Telegram notification failed to $chat_id: $response"
+                log "ERROR: Telegram notification failed to $chat_id (HTTP $http_code): $response"
+                echo -e "${RED}Telegram 通知失敗，請檢查日誌：$LOG_FILE${NC}"
             fi
         done
     fi
@@ -77,18 +82,31 @@ send_notification() {
     if [ -n "$DINGTALK_TOKEN" ]; then
         timestamp=$(date +%s%3N)
         if [ -n "$DINGTALK_SECRET" ]; then
-            sign=$(printf "%s\n%s" "$timestamp" "$DINGTALK_SECRET" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64)
-            sign=$(echo -n "$sign" | sed 's/+/%2B/g;s/=/%3D/g;s/&/%26/g')
+            # Generate HMAC-SHA256 signature
+            sign=$(echo -n "$timestamp\n$DINGTALK_SECRET" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64)
+            # URL encode the signature
+            encoded_sign=$(printf %s "$sign" | xxd -p -c 256 | tr -d '\n' | xxd -r -p | base64 -w 0)
+            encoded_sign=$(printf %s "$encoded_sign" | sed 's/+/%2B/g; s/=/%3D/g; s/&/%26/g')
+        else
+            encoded_sign=""
         fi
+        # Construct URL
+        url="$DINGTALK_TOKEN"
+        [ -n "$encoded_sign" ] && url="${url}&timestamp=$timestamp&sign=$encoded_sign"
         for attempt in {1..3}; do
-            response=$(curl -s -m 10 "${DINGTALK_TOKEN}&timestamp=$timestamp&sign=$sign" \
+            response=$(curl -s -w "%{http_code}" -m 10 "$url" \
                 -H 'Content-Type: application/json' \
                 -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"$message\"}}")
-            if echo "$response" | grep -q '"errcode":0'; then
-                log "DingTalk notification sent"
+            http_code=${response##*[!0-9]}
+            response=${response%[0-9]*}
+            if [ "$http_code" -eq 200 ] && echo "$response" | grep -q '"errcode":0'; then
+                log "DingTalk notification sent (attempt $attempt)"
                 break
             else
-                log "ERROR: DingTalk notification attempt $attempt failed: $response"
+                log "ERROR: DingTalk notification attempt $attempt failed (HTTP $http_code): $response"
+                if [ $attempt -eq 3 ]; then
+                    echo -e "${RED}釘釘通知失敗，請檢查日誌：$LOG_FILE${NC}"
+                fi
                 sleep 1
             fi
         done
@@ -121,18 +139,20 @@ validate_dingtalk() {
         return 1
     fi
     for attempt in {1..3}; do
-        response=$(curl -s -m 10 "$token" \
+        response=$(curl -s -w "%{http_code}" -m 10 "$token" \
             -H 'Content-Type: application/json' \
             -d '{"msgtype":"text","text":{"content":"測試消息"}}')
-        if echo "$response" | grep -q '"errcode":0'; then
+        http_code=${response##*[!0-9]}
+        response=${response%[0-9]*}
+        if [ "$http_code" -eq 200 ] && echo "$response" | grep -q '"errcode":0'; then
             log "DingTalk validation successful"
             return 0
         else
-            log "ERROR: DingTalk validation attempt $attempt failed: $response"
+            log "ERROR: DingTalk validation attempt $attempt failed (HTTP $http_code): $response"
             sleep 1
         fi
     done
-    echo -e "${RED}錯誤：無效的 DingTalk Webhook${NC}"
+    echo -e "${RED}錯誤：無效的 DingTalk Webhook，請檢查 Webhook URL 和網絡設置${NC}"
     log "ERROR: DingTalk validation failed after 3 attempts"
     return 1
 }
@@ -259,7 +279,7 @@ notify_boot() {
     hostname=$(hostname)
     ip=$(curl -s ipinfo.io/ip)
     time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-    message="🖥️ *開機通知*\n\n📝 備註: ${REMARK:-未設置}\n🖥️ 主機: $hostname\n🌐 IP: $ip\n🕒 時間: $time"
+    message="🖥️ <b>開機通知</b><br><br>📝 備註: ${REMARK:-未設置}<br>🖥️ 主機: $hostname<br>🌐 IP: $ip<br>🕒 時間: $time"
     send_notification "$message"
     log "Boot notification sent"
 }
@@ -275,7 +295,7 @@ notify_ssh() {
         ip=$(tail -n 1 "$log_file" | grep "Accepted" | gawk '{print $11}')
         hostname=$(hostname)
         time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-        message="🔐 *SSH 登錄通知*\n\n📝 備註: ${REMARK:-未設置}\n👤 用戶: $user\n🖥️ 主機: $hostname\n🌐 來源 IP: $ip\n🕒 時間: $time"
+        message="🔐 <b>SSH 登錄通知</b><br><br>📝 備註: ${REMARK:-未設置}<br>👤 用戶: $user<br>🖥️ 主機: $hostname<br>🌐 來源 IP: $ip<br>🕒 時間: $time"
         send_notification "$message"
         log "SSH login notification sent: $user from $ip"
     fi
@@ -290,7 +310,7 @@ monitor_resources() {
     if [ "$memory_usage" -gt "${MEMORY_THRESHOLD:-90}" ] || [ "$cpu_usage" -gt "${CPU_THRESHOLD:-90}" ]; then
         hostname=$(hostname)
         time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-        message="⚠️ *資源警報*\n\n📝 備註: ${REMARK:-未設置}\n🖥️ 主機: $hostname\n📈 內存使用率: ${memory_usage}%\n📊 CPU 使用率: ${cpu_usage}%\n🕒 時間: $time"
+        message="⚠️ <b>資源警報</b><br><br>📝 備註: ${REMARK:-未設置}<br>🖥️ 主機: $hostname<br>📈 內存使用率: ${memory_usage}%<br>📊 CPU 使用率: ${cpu_usage}%<br>🕒 時間: $time"
         send_notification "$message"
         log "Resource alert: Memory=$memory_usage%, CPU=$cpu_usage%"
     fi
@@ -309,7 +329,7 @@ monitor_ip() {
     if [ "$current_ip" != "$previous_ip" ] && [ -n "$current_ip" ]; then
         hostname=$(hostname)
         time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
-        message="🌐 *IP 變動通知*\n\n📝 備註: ${REMARK:-未設置}\n🖥️ 主機: $hostname\n🔙 原 IP: ${previous_ip:-未知}\n➡️ 新 IP: $current_ip\n🕒 時間: $time"
+        message="🌐 <b>IP 變動通知</b><br><br>📝 備註: ${REMARK:-未設置}<br>🖥️ 主機: $hostname<br>🔙 原 IP: ${previous_ip:-未知}<br>➡️ 新 IP: $current_ip<br>🕒 時間: $time"
         send_notification "$message"
         echo "$current_ip" > "$CURRENT_IP_FILE"
         log "IP change detected: $previous_ip -> $current_ip"
