@@ -1,9 +1,9 @@
 #!/bin/bash
-# VPS Notify Script for Alpine Linux (tgvsdd3-alpine.sh) v3.0.2
+# VPS Notify Script for Alpine Linux (tgvsdd3-alpine.sh) v3.0.3
 # Monitors IP changes, SSH logins, and system resources, sends notifications via Telegram and DingTalk
 
 # Constants
-SCRIPT_VERSION="3.0.2"
+SCRIPT_VERSION="3.0.3"
 SCRIPT_PATH="/usr/local/bin/vps_notify.sh"
 CONFIG_FILE="/etc/vps_notify.conf"
 LOG_FILE="/var/log/vps_notify.log"
@@ -23,9 +23,14 @@ log() {
     mkdir -p "$(dirname "$LOG_FILE")"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
     # Rotate log if size exceeds 1MB
-    if [ -f "$LOG_FILE" ] && [ "$(stat -f %z "$LOG_FILE" 2>/dev/null || stat -c %s "$LOG_FILE")" -gt 1048576 ]; then
-        mv "$LOG_FILE" "${LOG_FILE}.old"
-        touch "$LOG_FILE"
+    if [ -f "$LOG_FILE" ]; then
+        local size
+        size=$(stat -c %s "$LOG_FILE" 2>/dev/null || echo 0)
+        if [ "$size" -gt 1048576 ] 2>/dev/null; then
+            mv "$LOG_FILE" "${LOG_FILE}.old"
+            touch "$LOG_FILE"
+            chmod 644 "$LOG_FILE"
+        fi
     fi
 }
 
@@ -40,7 +45,7 @@ check_color_support() {
 
 # Check dependencies
 check_dependencies() {
-    local deps="curl gawk coreutils openssl"
+    local deps="curl gawk coreutils openssl iputils-ping"
     apk update >/dev/null 2>&1
     apk add $deps >/dev/null 2>&1
     for cmd in $deps; do
@@ -57,9 +62,14 @@ check_dependencies() {
 send_notification() {
     local message="$1"
     local timestamp sign encoded_sign
+    # Check network connectivity
+    if ! ping -c 1 api.telegram.org >/dev/null 2>&1 && ! ping -c 1 oapi.dingtalk.com >/dev/null 2>&1; then
+        log "ERROR: Network unreachable: api.telegram.org and oapi.dingtalk.com"
+        echo -e "${RED}網絡錯誤：無法連接到 Telegram 或 DingTalk 伺服器${NC}"
+        return 1
+    fi
     # Telegram
     if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_IDS" ]; then
-        # Convert \n to <br> for HTML mode
         message=$(echo "$message" | sed 's/\\n/<br>/g')
         IFS=',' read -ra CHAT_IDS <<< "$TELEGRAM_CHAT_IDS"
         for chat_id in "${CHAT_IDS[@]}"; do
@@ -77,22 +87,21 @@ send_notification() {
                 echo -e "${RED}Telegram 通知失敗，請檢查日誌：$LOG_FILE${NC}"
             fi
         done
+    else
+        log "WARNING: Telegram notification skipped (missing TOKEN or CHAT_IDS)"
     fi
     # DingTalk
     if [ -n "$DINGTALK_TOKEN" ]; then
         timestamp=$(date +%s%3N)
         if [ -n "$DINGTALK_SECRET" ]; then
-            # Generate HMAC-SHA256 signature
             sign=$(echo -n "$timestamp\n$DINGTALK_SECRET" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64)
-            # URL encode the signature
             encoded_sign=$(printf %s "$sign" | xxd -p -c 256 | tr -d '\n' | xxd -r -p | base64 -w 0)
             encoded_sign=$(printf %s "$encoded_sign" | sed 's/+/%2B/g; s/=/%3D/g; s/&/%26/g')
         else
             encoded_sign=""
         fi
-        # Construct URL
         url="$DINGTALK_TOKEN"
-        [ -n "$encoded_sign" ] && url="${url}&timestamp=$timestamp&sign=$encoded_sign"
+        [ -n "$encoded_sign" ] && url="${url}×tamp=$timestamp&sign=$encoded_sign"
         for attempt in {1..3}; do
             response=$(curl -s -w "%{http_code}" -m 10 "$url" \
                 -H 'Content-Type: application/json' \
@@ -110,6 +119,8 @@ send_notification() {
                 sleep 1
             fi
         done
+    else
+        log "WARNING: DingTalk notification skipped (missing TOKEN)"
     fi
 }
 
@@ -127,6 +138,7 @@ validate_telegram() {
         log "ERROR: Invalid Telegram Token: $response"
         return 1
     fi
+    log "Telegram validation successful"
     return 0
 }
 
@@ -169,6 +181,7 @@ modify_config() {
     else
         echo "$key=$value" > "$file"
     fi
+    chmod 600 "$file"
     log "Config updated: $key=$value"
 }
 
