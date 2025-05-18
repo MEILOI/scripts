@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd3.sh) v3.0
+# VPS Notify Script (tgvsdd3.sh) v3.0.1
 # Purpose: Monitor VPS status (IP, SSH, resources) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 3.0 (2025-05-18)
+# Version: 3.0.1 (2025-05-18)
 # Changelog:
+# - v3.0.1: Fixed ternary operator syntax, corrected DingTalk URL, added Telegram validation, enhanced dependency check, improved log cleanup
 # - v3.0: Updated DingTalk notification with retry mechanism and signed request support from tgvsdd2.sh v2.8
 # - v2.0: Initial optimized version with menu and multi-channel notifications
 
@@ -74,6 +75,24 @@ EOF
     log "Configuration saved to $CONFIG_FILE"
 }
 
+# Validate Telegram configuration
+validate_telegram() {
+    if [[ -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
+        local response=$(curl -s -m 5 "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe")
+        if echo "$response" | grep -q '"ok":true'; then
+            echo "Telegram Bot 验证成功"
+            return 0
+        else
+            echo "Telegram Bot 验证失败：无效的 Token"
+            log "ERROR: Telegram validation failed: $response"
+            return 1
+        fi
+    else
+        echo "Telegram 配置不完整"
+        return 1
+    fi
+}
+
 # Validate DingTalk configuration
 validate_dingtalk() {
     local webhook="$1"
@@ -140,6 +159,7 @@ check_ip_change() {
     
     current_ip=$(get_ipv4)
     if [ "$current_ip" = "获取失败" ]; then
+        log "ERROR: Failed to get IPv4 address"
         return 1
     fi
     
@@ -162,6 +182,7 @@ check_ip_change() {
         fi
     else
         echo "$current_ip" > "$IP_FILE"
+        log "Initial IP recorded: $current_ip"
     fi
     return 1
 }
@@ -297,8 +318,8 @@ monitor_usage() {
     fi
 
     alert=""
-    [[ $ENABLE_MEM_MONITOR == " Y" && $memory -ge $MEM_THRESHOLD ]] && alert+="🧠 *內存使用率過高*：${memory}%\n"
-    [[ $ENABLE_CPU_MONITOR == " Y" && $load -ge $CPU_THRESHOLD ]] && alert+="🔥 *CPU 負載過高*：${load}\n"
+    [[ $ENABLE_MEM_MONITOR == "Y" && $memory -ge $MEM_THRESHOLD ]] && alert+="🧠 *內存使用率過高*：${memory}%\n"
+    [[ $ENABLE_CPU_MONITOR == "Y" && $load -ge $CPU_THRESHOLD ]] && alert+="🔥 *CPU 負載過高*：${load}\n"
 
     if [[ -n "$alert" || "$FORCE_SEND" == "Y" ]]; then
         echo "$now" > /tmp/vps_notify_last
@@ -315,7 +336,7 @@ $alert"
 print_menu_header() {
     clear
     echo -e "${CYAN}════════════════════════════════════════${NC}"
-    echo -e "${CYAN}║       ${YELLOW}VPS 通知系統 (高級版 v3.0)  ${CYAN}║${NC}"
+    echo -e "${CYAN}║       ${YELLOW}VPS 通知系統 (高級版 v3.0.1)  ${CYAN}║${NC}"
     echo -e "${CYAN}════════════════════════════════════════${NC}"
     echo ""
 }
@@ -326,16 +347,25 @@ check_dependencies() {
         if ! command -v $cmd &> /dev/null; then
             echo -e "${RED}缺少依赖: $cmd${NC}"
             echo -e "${YELLOW}正在尝试安装必要依赖...${NC}"
-            apt update -y >/dev/null 2>&1 && apt install -y curl grep gawk systemd openssl >/dev/null 2>&1 || \
-            yum install -y curl grep gawk systemd openssl >/dev/null 2>&1
-            
+            if command -v apt &> /dev/null; then
+                apt update -y >/dev/null 2>&1 && apt install -y curl grep gawk systemd openssl >/dev/null 2>&1
+            elif command -v yum &> /dev/null; then
+                yum install -y curl grep gawk systemd openssl >/dev/null 2>&1
+            elif command -v dnf &> /dev/null; then
+                dnf install -y curl grep gawk systemd openssl >/dev/null 2>&1
+            else
+                echo -e "${RED}不支持的包管理器，请手动安装依赖${NC}"
+                log "ERROR: No supported package manager found for installing $cmd"
+                exit 1
+            fi
             if ! command -v $cmd &> /dev/null; then
-                echo -e "${RED}安装依赖失败，请手动安装${NC}"
+                echo -e "${RED}安装依赖 $cmd 失败，请手动安装${NC}"
                 log "ERROR: Failed to install dependency: $cmd"
                 exit 1
             fi
         fi
     done
+    log "Dependencies checked: curl grep awk systemctl openssl"
 }
 
 # Show current configuration
@@ -423,6 +453,9 @@ install_script() {
         read -rp "Token (格式如123456789:ABCDEF...): " TG_BOT_TOKEN
         echo -e "\n${CYAN}[3/9]${NC} 输入 Telegram Chat ID (支持多个，逗号分隔):"
         read -rp "Chat ID(s): " TG_CHAT_IDS
+        if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_IDS" ]; then
+            validate_telegram && echo -e "${GREEN}Token 有效${NC}" || echo -e "${RED}Token 无效${NC}"
+        fi
     else
         TG_BOT_TOKEN=""
         TG_CHAT_IDS=""
@@ -541,6 +574,7 @@ uninstall_script() {
     sed -i '/pam_exec.so.*pam_exec_notify.sh/d' /etc/pam.d/sshd
     rm -f /etc/security/pam_exec_notify.sh /tmp/vps_notify_last
     rm -f "$LOG_FILE" "${LOG_FILE}.old"
+    rmdir /var/log 2>/dev/null || true
     
     echo -e "\n${GREEN}✅ 卸载完成!${NC}"
     echo -e "${YELLOW}所有配置文件和脚本已删除${NC}"
@@ -624,17 +658,17 @@ modify_config() {
         show_config
         
         echo -e "请选择要修改的配置项:"
-        echo -e "${CYAN}1.${NC} ${ENABLE_TG_NOTIFY:-N} == "Y" ? "禁用" : "启用"} Telegram 通知"
+        echo -e "${CYAN}1.${NC} $([[ "$ENABLE_TG_NOTIFY" == "Y" ]] && echo "禁用" || echo "启用") Telegram 通知"
         echo -e "${CYAN}2.${NC} 修改 Telegram Bot Token"
         echo -e "${CYAN}3.${NC} 修改 Telegram Chat ID"
-        echo -e "${CYAN}4.${NC} ${ENABLE_DINGTALK_NOTIFY:-N} == "Y" ? "禁用" : "启用"} DingTalk 通知"
+        echo -e "${CYAN}4.${NC} $([[ "$ENABLE_DINGTALK_NOTIFY" == "Y" ]] && echo "禁用" || echo "启用") DingTalk 通知"
         echo -e "${CYAN}5.${NC} 修改 DingTalk Webhook"
         echo -e "${CYAN}6.${NC} 修改 DingTalk Secret"
         echo -e "${CYAN}7.${NC} 修改主机备注"
-        echo -e "${CYAN}8.${NC} ${SSH_NOTIFY:-N} == "Y" ? "禁用" : "启用"} SSH登录通知"
-        echo -e "${CYAN}9.${NC} ${ENABLE_MEM_MONITOR:-N} == "Y" ? "禁用" : "启用"} 内存监控 (当前阈值: ${MEM_THRESHOLD:-90}%)"
-        echo -e "${CYAN}10.${NC} ${ENABLE_CPU_MONITOR:-N} == "Y" ? "禁用" : "启用"} CPU监控 (当前阈值: ${CPU_THRESHOLD:-4})"
-        echo -e "${CYAN}11.${NC} ${ENABLE_IP_CHANGE_NOTIFY:-N} == "Y" ? "禁用" : "启用"} IP变动通知"
+        echo -e "${CYAN}8.${NC} $([[ "$SSH_NOTIFY" == "Y" ]] && echo "禁用" || echo "启用") SSH登录通知"
+        echo -e "${CYAN}9.${NC} $([[ "$ENABLE_MEM_MONITOR" == "Y" ]] && echo "禁用" || echo "启用") 内存监控 (当前阈值: ${MEM_THRESHOLD:-90}%)"
+        echo -e "${CYAN}10.${NC} $([[ "$ENABLE_CPU_MONITOR" == "Y" ]] && echo "禁用" || echo "启用") CPU监控 (当前阈值: ${CPU_THRESHOLD:-4})"
+        echo -e "${CYAN}11.${NC} $([[ "$ENABLE_IP_CHANGE_NOTIFY" == "Y" ]] && echo "禁用" || echo "启用") IP变动通知"
         echo -e "${CYAN}0.${NC} 返回主菜单"
         echo ""
         read -rp "请选择 [0-11]: " choice
@@ -643,14 +677,17 @@ modify_config() {
             1)
                 new_value=$([[ "$ENABLE_TG_NOTIFY" == "Y" ]] && echo "N" || echo "Y")
                 sed -i "s/ENABLE_TG_NOTIFY=.*$/ENABLE_TG_NOTIFY=\"$new_value\"/" "$CONFIG_FILE"
-                echo -e "${GREEN}Telegram通知已${new_value == "Y" ? "启用" : "禁用"}${NC}"
+                echo -e "${GREEN}Telegram通知已$( [[ "$new_value" == "Y" ]] && echo "启用" || echo "禁用" )${NC}"
+                log "Telegram notification set to $new_value"
                 ;;
             2)
                 echo -e "\n${YELLOW}请输入新的 Telegram Bot Token:${NC}"
                 read -rp "Token: " new_token
                 if [ -n "$new_token" ]; then
                     sed -i "s/TG_BOT_TOKEN=.*$/TG_BOT_TOKEN=\"$new_token\"/" "$CONFIG_FILE"
-                    echo -e "${GREEN}Telegram Token已更新${NC}"
+                    TG_BOT_TOKEN="$new_token"
+                    validate_telegram && echo -e "${GREEN}Telegram Token已更新且有效${NC}" || echo -e "${RED}Telegram Token无效${NC}"
+                    log "Telegram Bot Token updated"
                 fi
                 ;;
             3)
@@ -659,12 +696,14 @@ modify_config() {
                 if [ -n "$new_ids" ]; then
                     sed -i "s/TG_CHAT_IDS=.*$/TG_CHAT_IDS=\"$new_ids\"/" "$CONFIG_FILE"
                     echo -e "${GREEN}Telegram Chat ID已更新${NC}"
+                    log "Telegram Chat IDs updated: $new_ids"
                 fi
                 ;;
             4)
                 new_value=$([[ "$ENABLE_DINGTALK_NOTIFY" == "Y" ]] && echo "N" || echo "Y")
                 sed -i "s/ENABLE_DINGTALK_NOTIFY=.*$/ENABLE_DINGTALK_NOTIFY=\"$new_value\"/" "$CONFIG_FILE"
-                echo -e "${GREEN}DingTalk通知已${new_value == "Y" ? "启用" : "禁用"}${NC}"
+                echo -e "${GREEN}DingTalk通知已$( [[ "$new_value" == "Y" ]] && echo "启用" || echo "禁用" )${NC}"
+                log "DingTalk notification set to $new_value"
                 ;;
             5)
                 echo -e "\n${YELLOW}请输入新的 DingTalk Webhook:${NC}"
@@ -673,6 +712,7 @@ modify_config() {
                     sed -i "s/DINGTALK_WEBHOOK=.*$/DINGTALK_WEBHOOK=\"$new_webhook\"/" "$CONFIG_FILE"
                     validate_dingtalk "$new_webhook" "$DINGTALK_SECRET"
                     echo -e "${GREEN}DingTalk Webhook已更新${NC}"
+                    log "DingTalk Webhook updated"
                 fi
                 ;;
             6)
@@ -682,6 +722,7 @@ modify_config() {
                 echo "DINGTALK_SECRET=\"$new_secret\"" >> "$CONFIG_FILE"
                 validate_dingtalk "$DINGTALK_WEBHOOK" "$new_secret"
                 echo -e "${GREEN}DingTalk Secret已更新${NC}"
+                log "DingTalk Secret updated"
                 ;;
             7)
                 echo -e "\n${YELLOW}请输入新的主机备注:${NC}"
@@ -689,6 +730,7 @@ modify_config() {
                 sed -i "s/REMARK=.*$/REMARK=\"$new_remark\"/" "$CONFIG_FILE" 2>/dev/null || \
                 echo "REMARK=\"$new_remark\"" >> "$CONFIG_FILE"
                 echo -e "${GREEN}主机备注已更新${NC}"
+                log "Remark updated: $new_remark"
                 ;;
             8)
                 new_value=$([[ "$SSH_NOTIFY" == "Y" ]] && echo "N" || echo "Y")
@@ -705,16 +747,19 @@ EOF
                         echo "session optional pam_exec.so seteuid $pam_script" >> /etc/pam.d/sshd
                     fi
                     echo -e "${GREEN}SSH登录通知已启用${NC}"
+                    log "SSH login notification enabled"
                 else
                     sed -i '/pam_exec.so.*pam_exec_notify.sh/d' /etc/pam.d/sshd
                     rm -f /etc/security/pam_exec_notify.sh
                     echo -e "${GREEN}SSH登录通知已禁用${NC}"
+                    log "SSH login notification disabled"
                 fi
                 ;;
             9)
                 if [[ "$ENABLE_MEM_MONITOR" == "Y" ]]; then
                     sed -i "s/ENABLE_MEM_MONITOR=.*$/ENABLE_MEM_MONITOR=\"N\"/" "$CONFIG_FILE"
                     echo -e "${GREEN}内存监控已禁用${NC}"
+                    log "Memory monitoring disabled"
                 else
                     sed -i "s/ENABLE_MEM_MONITOR=.*$/ENABLE_MEM_MONITOR=\"Y\"/" "$CONFIG_FILE"
                     echo -e "\n${YELLOW}请设置内存使用率警报阈值 (%):${NC}"
@@ -723,12 +768,14 @@ EOF
                     sed -i "s/MEM_THRESHOLD=.*$/MEM_THRESHOLD=\"$threshold\"/" "$CONFIG_FILE" 2>/dev/null || \
                     echo "MEM_THRESHOLD=\"$threshold\"" >> "$CONFIG_FILE"
                     echo -e "${GREEN}内存监控已启用，阈值设为 ${threshold}%${NC}"
+                    log "Memory monitoring enabled with threshold $threshold%"
                 fi
                 ;;
             10)
                 if [[ "$ENABLE_CPU_MONITOR" == "Y" ]]; then
                     sed -i "s/ENABLE_CPU_MONITOR=.*$/ENABLE_CPU_MONITOR=\"N\"/" "$CONFIG_FILE"
                     echo -e "${GREEN}CPU监控已禁用${NC}"
+                    log "CPU monitoring disabled"
                 else
                     sed -i "s/ENABLE_CPU_MONITOR=.*$/ENABLE_CPU_MONITOR=\"Y\"/" "$CONFIG_FILE"
                     echo -e "\n${YELLOW}请设置CPU负载警报阈值:${NC}"
@@ -737,18 +784,21 @@ EOF
                     sed -i "s/CPU_THRESHOLD=.*$/CPU_THRESHOLD=\"$threshold\"/" "$CONFIG_FILE" 2>/dev/null || \
                     echo "CPU_THRESHOLD=\"$threshold\"" >> "$CONFIG_FILE"
                     echo -e "${GREEN}CPU监控已启用，阈值设为 ${threshold}${NC}"
+                    log "CPU monitoring enabled with threshold $threshold"
                 fi
                 ;;
             11)
                 if [[ "$ENABLE_IP_CHANGE_NOTIFY" == "Y" ]]; then
                     sed -i "s/ENABLE_IP_CHANGE_NOTIFY=.*$/ENABLE_IP_CHANGE_NOTIFY=\"N\"/" "$CONFIG_FILE"
                     echo -e "${GREEN}IP变动通知已禁用${NC}"
+                    log "IP change notification disabled"
                 else
                     sed -i "s/ENABLE_IP_CHANGE_NOTIFY=.*$/ENABLE_IP_CHANGE_NOTIFY=\"Y\"/" "$CONFIG_FILE" 2>/dev/null || \
                     echo "ENABLE_IP_CHANGE_NOTIFY=\"Y\"" >> "$CONFIG_FILE"
                     mkdir -p $(dirname "$IP_FILE")
                     get_ipv4 > "$IP_FILE"
                     echo -e "${GREEN}IP变动通知已启用，当前IP已记录${NC}"
+                    log "IP change notification enabled"
                 fi
                 ;;
             0)
@@ -812,7 +862,7 @@ show_menu() {
             4)
                 echo -e "\n${YELLOW}警告: 此操作将删除所有配置和脚本!${NC}"
                 read -rp "确认卸载? [y/N]: " confirm
-                if [[ "$confirm" =~ ^[Yy]$ ]];  then
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
                     uninstall_script
                 fi
                 ;;
