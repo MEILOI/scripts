@@ -1,12 +1,11 @@
 #!/bin/bash
 
-# VPS Notify Script (tgvsdd.sh) v2.8.2
+# VPS Notify Script (tgvsdd2.sh) v2.8.2
 # Purpose: Monitor VPS status (IP, SSH, resources) and send notifications via Telegram/DingTalk
 # License: MIT
-# Version: 2.8.2 (2025-05-18)
+# Version: 2.8 (2025-05-17)
 # Changelog:
-# - v2.8.2: Fixed Telegram notification format to use Markdown for proper line breaks
-# - v2.8: Added retry mechanism to DingTalk validation/sending, enhanced logging, removed invalid tags
+# - v2.8.2: Added retry mechanism to DingTalk validation/sending, enhanced logging, removed invalid tags
 # - v2.7: Enhanced comments, clarified validate_dingtalk logic (no access_token encryption)
 # - v2.2: Added DingTalk signed request support
 # - v2.1: Added script update functionality
@@ -122,7 +121,7 @@ validate_dingtalk() {
         if [[ -n "$secret" ]]; then
             local string_to_sign="${timestamp}\n${secret}"
             sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | tr -d '\n')
-            url="${webhook}&timestamp=${timestamp}&sign=${sign}"
+            url="${webhook}×tamp=${timestamp}&sign=${sign}"
         fi
 
         # Send test message (includes keyword "VPS")
@@ -156,14 +155,12 @@ send_telegram() {
     if [[ "$ENABLE_TG_NOTIFY" -eq 1 && -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_IDS" ]]; then
         for chat_id in ${TG_CHAT_IDS//,/ }; do
             local response=$(curl -s -m 5 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                -H "Content-Type: application/json" \
-                -d "{\"chat_id\": \"$chat_id\", \"text\": \"$message\", \"parse_mode\": \"Markdown\"}")
+                -d "chat_id=${chat_id}&text=${message}")
             if ! echo "$response" | grep -q '"ok":true'; then
                 log "ERROR: Failed to send Telegram message to $chat_id: $response"
-            else
-                log "Telegram notification sent to $chat_id: $message"
             fi
         done
+        log "Telegram notification sent: $message"
     fi
 }
 
@@ -184,10 +181,9 @@ send_dingtalk() {
             local url="$DINGTALK_WEBHOOK"
 
             if [[ -n "$DINGTALK_SECRET" ]]; then
-                local stringphysics::2
                 local string_to_sign="${timestamp}\n${DINGTALK_SECRET}"
                 sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$DINGTALK_SECRET" -binary | base64 | tr -d '\n')
-                url="${DINGTALK_WEBHOOK}&timestamp=${timestamp}&sign=${sign}"
+                url="${DINGTALK_WEBHOOK}×tamp=${timestamp}&sign=${sign}"
             fi
 
             response=$(curl -s -m 5 -X POST "$url" \
@@ -257,7 +253,7 @@ monitor_resources() {
         local used=$(echo "$mem_info" | awk '{print $3}')
         local usage=$((100 * used / total))
         if [[ $usage -ge $MEM_THRESHOLD ]]; then
-            message+="🧠 *内存使用率过高*：${usage}%\n"
+            message+="内存使用率: ${usage}% (超过阈值 ${MEM_THRESHOLD}%)\n"
         fi
     fi
 
@@ -266,7 +262,7 @@ monitor_resources() {
         local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}')
         local usage=$(printf "%.0f" "$cpu_usage")
         if [[ $usage -ge $CPU_THRESHOLD ]]; then
-            message+="🔥 *CPU 使用率过高*：${usage}%\n"
+            message+="CPU 使用率: ${usage}% (超过阈值 ${CPU_THRESHOLD}%)\n"
         fi
     fi
 
@@ -274,12 +270,12 @@ monitor_resources() {
     if [[ "$ENABLE_DISK_MONITOR" -eq 1 ]]; then
         local disk_usage=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
         if [[ $disk_usage -ge $DISK_THRESHOLD ]]; then
-            message+="💾 *磁盘使用率过高*：${disk_usage}%\n"
+            message+="磁盘使用率: ${disk_usage}% (超过阈值 ${DISK_THRESHOLD}%)\n"
         fi
     fi
 
     if [[ -n "$message" ]]; then
-        message="⚠️ *资源警报*\n$message🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+        message="⚠️ 资源警报\n$message时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
         send_telegram "$message"
         send_dingtalk "$message"
         echo "$current_time" > "$last_alert_file"
@@ -296,7 +292,7 @@ monitor_ip() {
             old_ip=$(cat "$ip_file")
         fi
         if [[ "$current_ip" != "$old_ip" ]]; then
-            local message="🌐 *IP 变动*\n📝 旧 IP:\n$old_ip\n🌐 新 IP:\n$current_ip\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+            local message="🌐 IP 变动\n旧 IP:\n$old_ip\n新 IP:\n$current_ip\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
             send_telegram "$message"
             send_dingtalk "$message"
             echo "$current_ip" > "$ip_file"
@@ -309,7 +305,7 @@ monitor_ip() {
 send_boot_notification() {
     local hostname=$(hostname)
     local ip_info=$(get_ip)
-    local message="✅ *VPS 已上线*\n📝 备注: ${REMARK:-未设置}\n🖥️ 主机名: $hostname\n🌐 公网IP:\n$ip_info\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+    local message="✅ VPS 已上线\n备注: $REMARK\n主机名: $hostname\n公网IP:\n$ip_info\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
     send_telegram "$message"
     send_dingtalk "$message"
     log "Boot notification sent"
@@ -319,7 +315,7 @@ send_boot_notification() {
 send_ssh_notification() {
     local user="$1"
     local ip="$2"
-    local message="🔐 *SSH 登录*\n👤 用户: $user\n🌐 来源 IP: $ip\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+    local message="🔐 SSH 登录\n用户: $user\n来源 IP: $ip\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
     send_telegram "$message"
     send_dingtalk "$message"
     log "SSH login notification sent: $user from $ip"
@@ -350,16 +346,16 @@ Description=VPS Notify Boot Service
 After=network-online.target
 [Service]
 Type=oneshot
-ExecStart=/bin/bash $PWD/tgvsdd.sh boot
+ExecStart=/bin/bash $PWD/tgvsdd2.sh boot
 RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOL
     systemctl enable vps_notify.service
     # Configure cron job
-    echo "*/5 * * * * root /bin/bash $PWD/tgvsdd.sh monitor" > /etc/cron.d/vps_notify
+    echo "*/5 * * * * root /bin/bash $PWD/tgvsdd2.sh monitor" > /etc/cron.d/vps_notify
     # Configure SSH login notification
-    echo "session optional pam_exec.so /bin/bash $PWD/tgvsdd.sh ssh" >> /etc/pam.d/sshd
+    echo "session optional pam_exec.so /bin/bash $PWD/tgvsdd2.sh ssh" >> /etc/pam.d/sshd
     save_config
     log "Installation completed"
     echo -e "${GREEN}安装完成！${NC}"
@@ -371,7 +367,7 @@ uninstall() {
     systemctl disable vps_notify.service
     rm -f /etc/systemd/system/vps_notify.service
     rm -f /etc/cron.d/vps_notify
-    sed -i '/pam_exec.so.*tgvsdd.sh/d' /etc/pam.d/sshd
+    sed -i '/pam_exec.so.*tgvsdd2.sh/d' /etc/pam.d/sshd
     rm -f "$CONFIG_FILE"
     rm -f /tmp/vps_notify_*
     log "Uninstallation completed"
@@ -380,12 +376,12 @@ uninstall() {
 
 # Update script
 update_script() {
-    local remote_url="https://raw.githubusercontent.com/meiloi/scripts/main/tgvsdd.sh"
-    local temp_file="/tmp/tgvsdd.sh"
+    local remote_url="https://raw.githubusercontent.com/meiloi/scripts/main/tgvsdd2.sh"
+    local temp_file="/tmp/tgvsdd2.sh"
     if curl -s -o "$temp_file" "$remote_url"; then
         if [[ -s "$temp_file" ]]; then
             chmod +x "$temp_file"
-            mv "$temp_file" "$PWD/tgvsdd.sh"
+            mv "$temp_file" "$PWD/tgvsdd2.sh"
             log "Script updated from $remote_url"
             echo -e "${GREEN}脚本更新成功！${NC}"
         else
@@ -483,13 +479,13 @@ test_notifications() {
                 echo -e "${GREEN}SSH 登录通知已发送${NC}"
                 ;;
             3)
-                local message="⚠️ *测试资源警报*\n🧠 内存使用率: 85%\n🔥 CPU 使用率: 90%\n💾 磁盘使用率: 95%\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                local message="⚠️ 测试资源警报\n内存使用率: 85%\nCPU 使用率: 90%\n磁盘使用率: 95%\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
                 send_telegram "$message"
                 send_dingtalk "$message"
                 echo -e "${GREEN}资源警报已发送${NC}"
                 ;;
             4)
-                local message="🌐 *测试 IP 变动*\n📝 旧 IP:\nIPv4: 192.168.1.1\n🌐 新 IP:\n$(get_ip)\n🕒 时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
+                local message="🌐 测试 IP 变动\n旧 IP:\nIPv4: 192.168.1.1\n新 IP:\n$(get_ip)\n时间: $(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')"
                 send_telegram "$message"
                 send_dingtalk "$message"
                 echo -e "${GREEN}IP 变动通知已发送${NC}"
@@ -517,7 +513,7 @@ check_status() {
     else
         echo -e "${RED}Cron 任务: 未配置${NC}"
     fi
-    if grep -q "pam_exec.so.*tgvsdd.sh" /etc/pam.d/sshd; then
+    if grep -q "pam_exec.so.*tgvsdd2.sh" /etc/pam.d/sshd; then
         echo -e "${GREEN}SSH 通知: 已启用${NC}"
     else
         echo -e "${RED}SSH 通知: 未启用${NC}"
