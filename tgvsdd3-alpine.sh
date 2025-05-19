@@ -1,9 +1,9 @@
 #!/bin/bash
 # VPS Notification Script for Alpine Linux (tgvsdd3-alpine.sh)
-# Version: 3.0.2
+# Version: 3.0.3
 
 # Constants
-SCRIPT_VERSION="3.0.2"
+SCRIPT_VERSION="3.0.3"
 CONFIG_FILE="/etc/vps_notify.conf"
 LOG_FILE="/var/log/vps_notify.log"
 REMARK="未設置"
@@ -50,42 +50,7 @@ validate_telegram() {
     return 0
 }
 
-# Validate DingTalk configuration
-validate_dingtalk() {
-    local token="$1"
-    if [ -z "$token" ]; then
-        echo -e "${RED}錯誤：釘釘 Token 為空${NC}"
-        log "ERROR: DingTalk Token empty"
-        return 1
-    fi
-    response=$(curl -s -m 10 "${token}")
-    if echo "$response" | grep -q '"errcode":0'; then
-        log "DingTalk validation successful"
-        return 0
-    else
-        echo -e "${RED}錯誤：無效的釘釘 Token${NC}"
-        log "ERROR: Invalid DingTalk Token: $response"
-        return 1
-    fi
-}
-
-# Modify configuration
-modify_config() {
-    local key="$1" value="$2" file="$CONFIG_FILE"
-    mkdir -p "$(dirname "$file")"
-    if [ -f "$file" ]; then
-        if grep -q "^$key=" "$file"; then
-            sed -i "s|^$key=.*|$key=$value|" "$file"
-        else
-            echo "$key=$value" >> "$file"
-        fi
-    else
-        echo "$key=$value" > "$file"
-    fi
-    log "Config updated: $key=$value"
-}
-
-# Send notification
+# Send notification (fixed for embedded newlines)
 send_notification() {
     local message="$1"
     local timestamp sign
@@ -93,10 +58,12 @@ send_notification() {
     if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_IDS" ]; then
         IFS=',' read -ra CHAT_IDS <<< "$TELEGRAM_CHAT_IDS"
         for chat_id in "${CHAT_IDS[@]}"; do
-            response=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
-                -d chat_id="$chat_id" \
-                -d text=$"$message" \
-                -m 10)
+            log "Sending Telegram notification to $chat_id with message: $message"
+            curl_cmd="curl -s -X POST \"https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage\" \
+                -d chat_id=\"$chat_id\" \
+                -d text='$message' \
+                -m 10"
+            response=$(eval "$curl_cmd")
             if echo "$response" | grep -q '"ok":true'; then
                 log "Telegram notification sent to $chat_id"
             else
@@ -104,7 +71,7 @@ send_notification() {
             fi
         done
     fi
-    # DingTalk
+    # DingTalk (unchanged)
     if [ -n "$DINGTALK_TOKEN" ]; then
         timestamp=$(date +%s%3N)
         if [ -n "$DINGTALK_SECRET" ]; then
@@ -112,7 +79,7 @@ send_notification() {
             sign=$(echo -n "$sign" | sed 's/+/%2B/g;s/=/%3D/g;s/&/%26/g')
         fi
         for attempt in {1..3}; do
-            response=$(curl -s -m 10 "${DINGTALK_TOKEN}&timestamp=$timestamp&sign=$sign" \
+            response=$(curl -s -m 10 "${DINGTALK_TOKEN}×tamp=$timestamp&sign=$sign" \
                 -H 'Content-Type: application/json' \
                 -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"$message\"}}")
             if echo "$response" | grep -q '"errcode":0'; then
