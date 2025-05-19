@@ -1,9 +1,9 @@
 #!/bin/bash
 # VPS Notification Script for Alpine Linux (tgvsdd3-alpine.sh)
-# Version: 3.0.4
+# Version: 3.0.5
 
 # Constants
-SCRIPT_VERSION="3.0.4"
+SCRIPT_VERSION="3.0.5"
 CONFIG_FILE="/etc/vps_notify.conf"
 LOG_FILE="/var/log/vps_notify.log"
 REMARK="未設置"
@@ -53,7 +53,7 @@ validate_telegram() {
 # Validate DingTalk configuration
 validate_dingtalk() {
     local token="$1"
-    if [ -z "$token",last_response); then
+    if [ -z "$token" ]; then
         echo -e "${RED}錯誤：釘釘 Token 為空${NC}"
         log "ERROR: DingTalk Token empty"
         return 1
@@ -69,6 +69,22 @@ validate_dingtalk() {
         log "ERROR: Invalid DingTalk Token: $response"
         return 1
     fi
+}
+
+# Modify configuration
+modify_config() {
+    local key="$1" value="$2" file="$CONFIG_FILE"
+    mkdir -p "$(dirname "$file")"
+    if [ -f "$file" ]; then
+        if grep -q "^$key=" "$file"; then
+            sed -i "s|^$key=.*|$key=$value|" "$file"
+        else
+            echo "$key=$value" >> "$file"
+        fi
+    else
+        echo "$key=$value" > "$file"
+    fi
+    log "Config updated: $key=$value"
 }
 
 # Send notification
@@ -113,6 +129,35 @@ send_notification() {
     fi
 }
 
+# Boot notification
+notify_boot() {
+    load_config
+    local hostname ip time message
+    hostname=$(hostname)
+    ip=$(curl -s ifconfig.me)
+    time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
+    message="🖥️ 開機通知\n\n📝 備註: ${REMARK:-未設置}\n🖥️ 主機: $hostname\n🌐 IP: $ip\n🕒 時間: $time\n\n---"
+    send_notification "$message"
+    log "Boot notification sent"
+}
+
+# SSH notification
+notify_ssh() {
+    load_config
+    local log_file="/var/log/messages"
+    [ -f /var/log/auth.log ] && log_file="/var/log/auth.log"
+    if tail -n 1 "$log_file" | grep -q "Accepted"; then
+        local user ip hostname time message
+        user=$(tail -n 1 "$log_file" | grep "Accepted" | gawk '{print $9}')
+        ip=$(tail -n 1 "$log_file" | grep "Accepted" | gawk '{print $11}')
+        hostname=$(hostname)
+        time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
+        message="🔐 SSH 登錄通知\n\n📝 備註: ${REMARK:-未設置}\n👤 用戶: $user\n🖥️ 主機: $hostname\n🌐 來源 IP: $ip\n🕒 時間: $time\n\n---"
+        send_notification "$message"
+        log "SSH login notification sent: $user from $ip"
+    fi
+}
+
 # Resource monitor
 monitor_resources() {
     load_config
@@ -125,6 +170,21 @@ monitor_resources() {
     message="⚠️ 資源警報\n\n📝 備註: ${REMARK:-未設置}\n🖥️ 主機: $hostname\n📈 內存使用率: ${memory_usage}%\n📊 CPU 使用率: ${cpu_usage}%\n🕒 時間: $time\n\n---"
     send_notification "$message"
     log "Resource alert sent: Memory $memory_usage%, CPU $cpu_usage%"
+}
+
+# IP monitor
+monitor_ip() {
+    load_config
+    local current_ip previous_ip hostname time message ip_file="/var/log/vps_notify_ip.log"
+    current_ip=$(curl -s ifconfig.me)
+    [ -f "$ip_file" ] && previous_ip=$(cat "$ip_file")
+    [ "$current_ip" = "$previous_ip" ] && return
+    echo "$current_ip" > "$ip_file"
+    hostname=$(hostname)
+    time=$(date '+%Y年 %m月 %d日 %A %H:%M:%S %Z')
+    message="🌐 IP 變動通知\n\n📝 備註: ${REMARK:-未設置}\n🖥️ 主機: $hostname\n🔙 原 IP: ${previous_ip:-未知}\n➡️ 新 IP: $current_ip\n🕒 時間: $time\n\n---"
+    send_notification "$message"
+    log "IP change notification sent: $previous_ip to $current_ip"
 }
 
 # Install function
@@ -199,4 +259,91 @@ EOF
     log "Installation completed"
 }
 
-# [其他函數和主邏輯與 v3.0.3 相同，省略]
+# Uninstall function
+uninstall() {
+    echo -e "${YELLOW}正在卸載 VPS 通知腳本...${NC}"
+    if command -v rc-service >/dev/null; then
+        rc-service vps_notify stop 2>/dev/null
+        rc-update del vps_notify default 2>/dev/null
+        rm -f /etc/init.d/vps_notify
+        log "Openrc service removed"
+    fi
+    rm -f /usr/local/bin/vps_notify.sh
+    rm -f "$CONFIG_FILE"
+    rm -f /var/log/vps_notify_ip.log
+    echo -e "${GREEN}卸載完成！日誌文件未刪除：$LOG_FILE${NC}"
+    log "Uninstallation completed"
+}
+
+# Menu
+menu() {
+    while true; do
+        echo -e "${YELLOW}VPS 通知腳本 (v$SCRIPT_VERSION)${NC}"
+        echo "1) 安裝"
+        echo "2) 卸載"
+        echo "3) 配置 Telegram"
+        echo "4) 配置釘釘"
+        echo "5) 測試通知"
+        echo "6) 查看日誌"
+        echo "7) 退出"
+        read -p "請選擇操作 [1-7]: " choice
+        case "$choice" in
+            1) install ;;
+            2) uninstall ;;
+            3)
+                echo -e "${YELLOW}設置 Telegram 通知${NC}"
+                read -p "輸入 Telegram Bot Token（必填）: " TELEGRAM_TOKEN
+                read -p "輸入 Telegram Chat ID（多個用逗號分隔）: " TELEGRAM_CHAT_IDS
+                if validate_telegram "$TELEGRAM_TOKEN" "$TELEGRAM_CHAT_IDS"; then
+                    modify_config "TELEGRAM_TOKEN" "$TELEGRAM_TOKEN"
+                    modify_config "TELEGRAM_CHAT_IDS" "$TELEGRAM_CHAT_IDS"
+                    echo -e "${GREEN}Telegram 配置保存成功${NC}"
+                else
+                    echo -e "${RED}Telegram 配置無效${NC}"
+                fi
+                ;;
+            4)
+                echo -e "${YELLOW}設置釘釘通知${NC}"
+                echo -e "${YELLOW}請輸入完整的釘釘 Webhook URL（格式：https://oapi.dingtalk.com/robot/send?access_token=xxx）${NC}"
+                read -p "輸入釘釘 Webhook URL（必填）: " DINGTALK_TOKEN
+                read -p "輸入釘釘 Secret（留空跳過）: " DINGTALK_SECRET
+                if validate_dingtalk "$DINGTALK_TOKEN"; then
+                    modify_config "DINGTALK_TOKEN" "$DINGTALK_TOKEN"
+                    [ -n "$DINGTALK_SECRET" ] && modify_config "DINGTALK_SECRET" "$DINGTALK_SECRET"
+                    echo -e "${GREEN}釘釘配置保存成功${NC}"
+                else
+                    echo -e "${RED}釘釘配置無效${NC}"
+                fi
+                ;;
+            5)
+                echo -e "${YELLOW}測試通知${NC}"
+                notify_boot
+                notify_ssh
+                monitor_resources
+                monitor_ip
+                echo -e "${GREEN}測試通知已發送，請檢查 Telegram 或釘釘${NC}"
+                ;;
+            6)
+                echo -e "${YELLOW}查看日誌${NC}"
+                if [ -f "$LOG_FILE" ]; then
+                    cat "$LOG_FILE"
+                else
+                    echo -e "${RED}日誌文件不存在：$LOG_FILE${NC}"
+                fi
+                ;;
+            7) exit 0 ;;
+            *) echo -e "${RED}無效選項，請選擇 [1-7]${NC}" ;;
+        esac
+    done
+}
+
+# Main logic
+case "$1" in
+    install) install ;;
+    uninstall) uninstall ;;
+    boot) notify_boot ;;
+    ssh) notify_ssh ;;
+    monitor) monitor_resources ;;
+    ip) monitor_ip ;;
+    menu|*) menu ;;
+esac
