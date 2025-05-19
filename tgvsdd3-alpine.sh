@@ -1,9 +1,9 @@
 #!/bin/bash
 # VPS Notification Script for Alpine Linux (tgvsdd3-alpine.sh)
-# Version: 3.0.6
+# Version: 3.0.7
 
 # Constants
-SCRIPT_VERSION="3.0.6"
+SCRIPT_VERSION="3.0.7"
 CONFIG_FILE="/etc/vps_notify.conf"
 LOG_FILE="/var/log/vps_notify.log"
 REMARK="未設置"
@@ -52,7 +52,7 @@ validate_telegram() {
 
 # Validate DingTalk configuration
 validate_dingtalk() {
-    local token="$1"
+    local token="$1" keyword="${2:-Validation}"
     if [ -z "$token" ]; then
         echo -e "${RED}錯誤：釘釘 Token 為空${NC}"
         log "ERROR: DingTalk Token empty"
@@ -60,12 +60,12 @@ validate_dingtalk() {
     fi
     response=$(curl -s -m 10 -X POST "${token}" \
         -H 'Content-Type: application/json' \
-        -d '{"msgtype":"text","text":{"content":"Validation test"}}')
+        -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"${keyword} test\"}}")
     if echo "$response" | grep -q '"errcode":0'; then
         log "DingTalk validation successful"
         return 0
     else
-        echo -e "${RED}錯誤：無效的釘釘 Token${NC}"
+        echo -e "${RED}錯誤：無效的釘釘 Token，請檢查 Webhook URL 或關鍵詞${NC}"
         log "ERROR: Invalid DingTalk Token: $response"
         return 1
     fi
@@ -90,15 +90,16 @@ modify_config() {
 # Send notification
 send_notification() {
     local message="$1"
-    local timestamp sign
+    local timestamp sign text
     # Telegram
     if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_IDS" ]; then
         IFS=',' read -ra CHAT_IDS <<< "$TELEGRAM_CHAT_IDS"
         for chat_id in "${CHAT_IDS[@]}"; do
-            log "Sending Telegram notification to $chat_id with message: $message"
+            text=$(printf '%b' "$message")
+            log "Sending Telegram notification to $chat_id with text: $text"
             response=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
                 -d chat_id="$chat_id" \
-                -d text=$"$message" \
+                -d text="$text" \
                 -m 10)
             if echo "$response" | grep -q '"ok":true'; then
                 log "Telegram notification sent to $chat_id"
@@ -115,9 +116,9 @@ send_notification() {
             sign=$(echo -n "$sign" | sed 's/+/%2B/g;s/=/%3D/g;s/&/%26/g')
         fi
         for attempt in {1..3}; do
-            response=$(curl -s -m 10 "${DINGTALK_TOKEN}×tamp=$timestamp&sign=$sign" \
+            response=$(curl -s -m 10 "${DINGTALK_TOKEN}&timestamp=$timestamp&sign=$sign" \
                 -H 'Content-Type: application/json' \
-                -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"$message\"}}")
+                -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"${DINGTALK_KEYWORD:-Notification} $message\"}}")
             if echo "$response" | grep -q '"errcode":0'; then
                 log "DingTalk notification sent"
                 break
@@ -144,8 +145,14 @@ notify_boot() {
 # SSH notification
 notify_ssh() {
     load_config
-    local log_file="/var/log/messages"
-    [ -f /var/log/auth.log ] && log_file="/var/log/auth.log"
+    local log_file
+    for f in /var/log/auth.log /var/log/secure /var/log/messages; do
+        [ -f "$f" ] && log_file="$f" && break
+    done
+    if [ -z "$log_file" ]; then
+        log "ERROR: No SSH log file found"
+        return 1
+    fi
     if tail -n 1 "$log_file" | grep -q "Accepted"; then
         local user ip hostname time message
         user=$(tail -n 1 "$log_file" | grep "Accepted" | gawk '{print $9}')
@@ -222,9 +229,12 @@ install() {
     echo -e "${YELLOW}請輸入完整的釘釘 Webhook URL（格式：https://oapi.dingtalk.com/robot/send?access_token=xxx）${NC}"
     read -p "輸入釘釘 Webhook URL（留空跳過）: " DINGTALK_TOKEN
     if [ -n "$DINGTALK_TOKEN" ]; then
+        echo -e "${YELLOW}請在釘釘機器人設置中查看關鍵詞（例如‘警報’），若無關鍵詞則留空${NC}"
+        read -p "輸入釘釘關鍵詞（留空跳過）: " DINGTALK_KEYWORD
         read -p "輸入釘釘 Secret（留空跳過）: " DINGTALK_SECRET
-        if validate_dingtalk "$DINGTALK_TOKEN"; then
+        if validate_dingtalk "$DINGTALK_TOKEN" "$DINGTALK_KEYWORD"; then
             modify_config "DINGTALK_TOKEN" "$DINGTALK_TOKEN"
+            [ -n "$DINGTALK_KEYWORD" ] && modify_config "DINGTALK_KEYWORD" "$DINGTALK_KEYWORD"
             [ -n "$DINGTALK_SECRET" ] && modify_config "DINGTALK_SECRET" "$DINGTALK_SECRET"
             echo -e "${GREEN}釘釘配置保存成功${NC}"
         else
@@ -286,11 +296,11 @@ menu() {
         echo "5) 測試通知"
         echo "6) 查看日誌"
         echo "7) 退出"
-        read -p "請選擇操作 [1-7]: " choice
+        read -p "請選擇操作 [1-7] 或關鍵詞（install, uninstall, telegram, dingtalk, test, log, exit）: " choice
         case "$choice" in
-            1) install ;;
-            2) uninstall ;;
-            3)
+            1|"install") install ;;
+            2|"uninstall") uninstall ;;
+            3|"telegram")
                 echo -e "${YELLOW}設置 Telegram 通知${NC}"
                 read -p "輸入 Telegram Bot Token（必填）: " TELEGRAM_TOKEN
                 read -p "輸入 Telegram Chat ID（多個用逗號分隔）: " TELEGRAM_CHAT_IDS
@@ -302,28 +312,31 @@ menu() {
                     echo -e "${RED}Telegram 配置無效${NC}"
                 fi
                 ;;
-            4)
+            4|"dingtalk")
                 echo -e "${YELLOW}設置釘釘通知${NC}"
                 echo -e "${YELLOW}請輸入完整的釘釘 Webhook URL（格式：https://oapi.dingtalk.com/robot/send?access_token=xxx）${NC}"
                 read -p "輸入釘釘 Webhook URL（必填）: " DINGTALK_TOKEN
+                echo -e "${YELLOW}請在釘釘機器人設置中查看關鍵詞（例如‘警報’），若無關鍵詞則留空${NC}"
+                read -p "輸入釘釘關鍵詞（留空跳過）: " DINGTALK_KEYWORD
                 read -p "輸入釘釘 Secret（留空跳過）: " DINGTALK_SECRET
-                if validate_dingtalk "$DINGTALK_TOKEN"; then
+                if validate_dingtalk "$DINGTALK_TOKEN" "$DINGTALK_KEYWORD"; then
                     modify_config "DINGTALK_TOKEN" "$DINGTALK_TOKEN"
+                    [ -n "$DINGTALK_KEYWORD" ] && modify_config "DINGTALK_KEYWORD" "$DINGTALK_KEYWORD"
                     [ -n "$DINGTALK_SECRET" ] && modify_config "DINGTALK_SECRET" "$DINGTALK_SECRET"
                     echo -e "${GREEN}釘釘配置保存成功${NC}"
                 else
                     echo -e "${RED}釘釘配置無效${NC}"
                 fi
                 ;;
-            5)
+            5|"test")
                 echo -e "${YELLOW}測試通知${NC}"
                 notify_boot
                 notify_ssh
                 monitor_resources
                 monitor_ip
-                echo -e "${GREEN}測試通知已發送，請檢查 Telegram 或deps釘釘${NC}"
+                echo -e "${GREEN}測試通知已發送，請檢查 Telegram 或不需要deps釘釘${NC}"
                 ;;
-            6)
+            6|"log")
                 echo -e "${YELLOW}查看日誌${NC}"
                 if [ -f "$LOG_FILE" ]; then
                     cat "$LOG_FILE"
@@ -331,8 +344,8 @@ menu() {
                     echo -e "${RED}日誌文件不存在：$LOG_FILE${NC}"
                 fi
                 ;;
-            7) exit 0 ;;
-            *) echo -e "${RED}無效選項，請選擇 [1-7]${NC}" ;;
+            7|"exit") exit 0 ;;
+            *) echo -e "${RED}無效選項，請選擇 [1-7] 或關鍵詞${NC}" ;;
         esac
     done
 }
