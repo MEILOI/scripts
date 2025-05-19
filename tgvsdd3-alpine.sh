@@ -2,9 +2,90 @@
 # VPS Notification Script for Alpine Linux (tgvsdd3-alpine.sh)
 # Version: 3.0.2
 
-# [其他不變的常量、函數和邏輯省略，例如 load_config、validate_dingtalk、log 等]
+# Constants
+SCRIPT_VERSION="3.0.2"
+CONFIG_FILE="/etc/vps_notify.conf"
+LOG_FILE="/var/log/vps_notify.log"
+REMARK="未設置"
 
-# Send notification (updated for plain text with embedded newlines)
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Logging function
+log() {
+    mkdir -p "$(dirname "$LOG_FILE")"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    # Rotate log if size exceeds 1MB
+    if [ -f "$LOG_FILE" ] && [ "$(wc -c < "$LOG_FILE")" -gt 1048576 ]; then
+        mv "$LOG_FILE" "${LOG_FILE}.old"
+        touch "$LOG_FILE"
+    fi
+}
+
+# Load configuration
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+    fi
+}
+
+# Validate Telegram configuration
+validate_telegram() {
+    local token="$1" chat_ids="$2"
+    if [ -z "$token" ] || [ -z "$chat_ids" ]; then
+        echo -e "${RED}錯誤：Telegram Token 或 Chat ID 為空${NC}"
+        log "ERROR: Telegram Token or Chat ID empty"
+        return 1
+    fi
+    response=$(curl -s -m 10 "https://api.telegram.org/bot$token/getMe")
+    if ! echo "$response" | grep -q '"ok":true'; then
+        echo -e "${RED}錯誤：無效的 Telegram Token${NC}"
+        log "ERROR: Invalid Telegram Token: $response"
+        return 1
+    fi
+    log "Telegram validation successful"
+    return 0
+}
+
+# Validate DingTalk configuration
+validate_dingtalk() {
+    local token="$1"
+    if [ -z "$token" ]; then
+        echo -e "${RED}錯誤：釘釘 Token 為空${NC}"
+        log "ERROR: DingTalk Token empty"
+        return 1
+    fi
+    response=$(curl -s -m 10 "${token}")
+    if echo "$response" | grep -q '"errcode":0'; then
+        log "DingTalk validation successful"
+        return 0
+    else
+        echo -e "${RED}錯誤：無效的釘釘 Token${NC}"
+        log "ERROR: Invalid DingTalk Token: $response"
+        return 1
+    fi
+}
+
+# Modify configuration
+modify_config() {
+    local key="$1" value="$2" file="$CONFIG_FILE"
+    mkdir -p "$(dirname "$file")"
+    if [ -f "$file" ]; then
+        if grep -q "^$key=" "$file"; then
+            sed -i "s|^$key=.*|$key=$value|" "$file"
+        else
+            echo "$key=$value" >> "$file"
+        fi
+    else
+        echo "$key=$value" > "$file"
+    fi
+    log "Config updated: $key=$value"
+}
+
+# Send notification
 send_notification() {
     local message="$1"
     local timestamp sign
@@ -23,7 +104,7 @@ send_notification() {
             fi
         done
     fi
-    # DingTalk (unchanged)
+    # DingTalk
     if [ -n "$DINGTALK_TOKEN" ]; then
         timestamp=$(date +%s%3N)
         if [ -n "$DINGTALK_SECRET" ]; then
@@ -45,7 +126,7 @@ send_notification() {
     fi
 }
 
-# Boot notification (updated message format)
+# Boot notification
 notify_boot() {
     load_config
     local hostname ip time message
@@ -57,7 +138,7 @@ notify_boot() {
     log "Boot notification sent"
 }
 
-# SSH notification (updated message format)
+# SSH notification
 notify_ssh() {
     load_config
     local log_file="/var/log/messages"
@@ -74,7 +155,7 @@ notify_ssh() {
     fi
 }
 
-# Resource monitor (updated message format)
+# Resource monitor
 monitor_resources() {
     load_config
     local memory_usage cpu_usage hostname time message
@@ -88,7 +169,7 @@ monitor_resources() {
     log "Resource alert sent: Memory $memory_usage%, CPU $cpu_usage%"
 }
 
-# IP monitor (updated message format)
+# IP monitor
 monitor_ip() {
     load_config
     local current_ip previous_ip hostname time message ip_file="/var/log/vps_notify_ip.log"
@@ -103,4 +184,161 @@ monitor_ip() {
     log "IP change notification sent: $previous_ip to $current_ip"
 }
 
-# [其他不變的函數和主邏輯省略，例如 install、uninstall、menu 等]
+# Install function
+install() {
+    echo -e "${YELLOW}正在安裝 VPS 通知腳本...${NC}"
+    apk update >/dev/null 2>&1
+    apk add bash curl gawk coreutils openssl >/dev/null 2>&1
+    for cmd in bash curl gawk date openssl; do
+        if ! command -v "$cmd" >/dev/null; then
+            echo -e "${RED}錯誤：無法安裝 $cmd，請手動安裝${NC}"
+            log "ERROR: Failed to install dependency: $cmd"
+            exit 1
+        fi
+    done
+    log "Dependencies installed successfully"
+
+    cp "$0" /usr/local/bin/vps_notify.sh
+    chmod +x /usr/local/bin/vps_notify.sh
+    log "Script copied to /usr/local/bin/vps_notify.sh"
+
+    echo -e "${YELLOW}設置 Telegram 通知${NC}"
+    read -p "輸入 Telegram Bot Token（留空跳過）: " TELEGRAM_TOKEN
+    if [ -n "$TELEGRAM_TOKEN" ]; then
+        read -p "輸入 Telegram Chat ID（多個用逗號分隔）: " TELEGRAM_CHAT_IDS
+        if validate_telegram "$TELEGRAM_TOKEN" "$TELEGRAM_CHAT_IDS"; then
+            modify_config "TELEGRAM_TOKEN" "$TELEGRAM_TOKEN"
+            modify_config "TELEGRAM_CHAT_IDS" "$TELEGRAM_CHAT_IDS"
+            echo -e "${GREEN}Telegram 配置保存成功${NC}"
+        else
+            echo -e "${RED}Telegram 配置無效，跳過${NC}"
+        fi
+    fi
+
+    echo -e "${YELLOW}設置釘釘通知${NC}"
+    read -p "輸入釘釘 Webhook URL（留空跳過）: " DINGTALK_TOKEN
+    if [ -n "$DINGTALK_TOKEN" ]; then
+        read -p "輸入釘釘 Secret（留空跳過）: " DINGTALK_SECRET
+        if validate_dingtalk "$DINGTALK_TOKEN"; then
+            modify_config "DINGTALK_TOKEN" "$DINGTALK_TOKEN"
+            [ -n "$DINGTALK_SECRET" ] && modify_config "DINGTALK_SECRET" "$DINGTALK_SECRET"
+            echo -e "${GREEN}釘釘配置保存成功${NC}"
+        else
+            echo -e "${RED}釘釘配置無效，跳過${NC}"
+        fi
+    fi
+
+    echo -e "${YELLOW}設置資源監控閾值${NC}"
+    read -p "輸入內存使用率閾值（%）[默認 90]: " MEMORY_THRESHOLD
+    read -p "輸入 CPU 使用率閾值（%）[默認 90]: " CPU_THRESHOLD
+    [ -n "$MEMORY_THRESHOLD" ] && modify_config "MEMORY_THRESHOLD" "$MEMORY_THRESHOLD"
+    [ -n "$CPU_THRESHOLD" ] && modify_config "CPU_THRESHOLD" "$CPU_THRESHOLD"
+
+    if command -v rc-update >/dev/null; then
+        echo -e "${YELLOW}設置 openrc 服務${NC}"
+        cat > /etc/init.d/vps_notify << 'EOF'
+#!/sbin/openrc-run
+name="vps_notify"
+description="VPS Notification Service"
+command="/usr/local/bin/vps_notify.sh"
+command_args="monitor"
+command_background="yes"
+pidfile="/var/run/vps_notify.pid"
+EOF
+        chmod +x /etc/init.d/vps_notify
+        rc-update add vps_notify default
+        rc-service vps_notify start
+        log "Openrc service installed and started"
+    fi
+
+    echo -e "${GREEN}安裝完成！使用 ./tgvsdd3-alpine.sh 管理腳本${NC}"
+    log "Installation completed"
+}
+
+# Uninstall function
+uninstall() {
+    echo -e "${YELLOW}正在卸載 VPS 通知腳本...${NC}"
+    if command -v rc-service >/dev/null; then
+        rc-service vps_notify stop 2>/dev/null
+        rc-update del vps_notify default 2>/dev/null
+        rm -f /etc/init.d/vps_notify
+        log "Openrc service removed"
+    fi
+    rm -f /usr/local/bin/vps_notify.sh
+    rm -f "$CONFIG_FILE"
+    rm -f /var/log/vps_notify_ip.log
+    echo -e "${GREEN}卸載完成！日誌文件未刪除：$LOG_FILE${NC}"
+    log "Uninstallation completed"
+}
+
+# Menu
+menu() {
+    while true; do
+        echo -e "${YELLOW}VPS 通知腳本 (v$SCRIPT_VERSION)${NC}"
+        echo "1) 安裝"
+        echo "2) 卸載"
+        echo "3) 配置 Telegram"
+        echo "4) 配置釘釘"
+        echo "5) 測試通知"
+        echo "6) 查看日誌"
+        echo "7) 退出"
+        read -p "請選擇操作 [1-7]: " choice
+        case "$choice" in
+            1) install ;;
+            2) uninstall ;;
+            3)
+                echo -e "${YELLOW}設置 Telegram 通知${NC}"
+                read -p "輸入 Telegram Bot Token（必填）: " TELEGRAM_TOKEN
+                read -p "輸入 Telegram Chat ID（多個用逗號分隔）: " TELEGRAM_CHAT_IDS
+                if validate_telegram "$TELEGRAM_TOKEN" "$TELEGRAM_CHAT_IDS"; then
+                    modify_config "TELEGRAM_TOKEN" "$TELEGRAM_TOKEN"
+                    modify_config "TELEGRAM_CHAT_IDS" "$TELEGRAM_CHAT_IDS"
+                    echo -e "${GREEN}Telegram 配置保存成功${NC}"
+                else
+                    echo -e "${RED}Telegram 配置無效${NC}"
+                fi
+                ;;
+            4)
+                echo -e "${YELLOW}設置釘釘通知${NC}"
+                read -p "輸入釘釘 Webhook URL（必填）: " DINGTALK_TOKEN
+                read -p "輸入釘釘 Secret（留空跳過）: " DINGTALK_SECRET
+                if validate_dingtalk "$DINGTALK_TOKEN"; then
+                    modify_config "DINGTALK_TOKEN" "$DINGTALK_TOKEN"
+                    [ -n "$DINGTALK_SECRET" ] && modify_config "DINGTALK_SECRET" "$DINGTALK_SECRET"
+                    echo -e "${GREEN}釘釘配置保存成功${NC}"
+                else
+                    echo -e "${RED}釘釘配置無效${NC}"
+                fi
+                ;;
+            5)
+                echo -e "${YELLOW}測試通知${NC}"
+                notify_boot
+                notify_ssh
+                monitor_resources
+                monitor_ip
+                echo -e "${GREEN}測試通知已發送，請檢查 Telegram 或釘釘${NC}"
+                ;;
+            6)
+                echo -e "${YELLOW}查看日誌${NC}"
+                if [ -f "$LOG_FILE" ]; then
+                    cat "$LOG_FILE"
+                else
+                    echo -e "${RED}日誌文件不存在：$LOG_FILE${NC}"
+                fi
+                ;;
+            7) exit 0 ;;
+            *) echo -e "${RED}無效選項，請選擇 [1-7]${NC}" ;;
+        esac
+    done
+}
+
+# Main logic
+case "$1" in
+    install) install ;;
+    uninstall) uninstall ;;
+    boot) notify_boot ;;
+    ssh) notify_ssh ;;
+    monitor) monitor_resources ;;
+    ip) monitor_ip ;;
+    menu|*) menu ;;
+esac
