@@ -1,9 +1,9 @@
 #!/bin/bash
 # VPS Notification Script for Alpine Linux (tgvsdd3-alpine.sh)
-# Version: 3.0.5
+# Version: 3.0.6
 
 # Constants
-SCRIPT_VERSION="3.0.5"
+SCRIPT_VERSION="3.0.6"
 CONFIG_FILE="/etc/vps_notify.conf"
 LOG_FILE="/var/log/vps_notify.log"
 REMARK="未設置"
@@ -115,7 +115,7 @@ send_notification() {
             sign=$(echo -n "$sign" | sed 's/+/%2B/g;s/=/%3D/g;s/&/%26/g')
         fi
         for attempt in {1..3}; do
-            response=$(curl -s -m 10 "${DINGTALK_TOKEN}&timestamp=$timestamp&sign=$sign" \
+            response=$(curl -s -m 10 "${DINGTALK_TOKEN}×tamp=$timestamp&sign=$sign" \
                 -H 'Content-Type: application/json' \
                 -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"$message\"}}")
             if echo "$response" | grep -q '"errcode":0'; then
@@ -191,7 +191,7 @@ monitor_ip() {
 install() {
     echo -e "${YELLOW}正在安裝 VPS 通知腳本...${NC}"
     apk update >/dev/null 2>&1
-    apk add bash curl gawk coreutils openssl vmstat >/dev/null 2>&1
+    apk add bash curl gawk coreutils openssl procps >/dev/null 2>&1
     for cmd in bash curl gawk date openssl vmstat; do
         if ! command -v "$cmd" >/dev/null; then
             echo -e "${RED}錯誤：無法安裝 $cmd，請手動安裝${NC}"
@@ -321,7 +321,7 @@ menu() {
                 notify_ssh
                 monitor_resources
                 monitor_ip
-                echo -e "${GREEN}測試通知已發送，請檢查 Telegram 或釘釘${NC}"
+                echo -e "${GREEN}測試通知已發送，請檢查 Telegram 或deps釘釘${NC}"
                 ;;
             6)
                 echo -e "${YELLOW}查看日誌${NC}"
